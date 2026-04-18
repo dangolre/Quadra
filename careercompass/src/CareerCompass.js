@@ -5,7 +5,8 @@ import { useState, useEffect, useRef } from "react";
 // ═══════════════════════════════════════════════════
 // Replace with your real Hunter.io API key (free tier: 25 lookups/month)
 // Get one at https://hunter.io/api-keys
-const HUNTER_API_KEY = "YOUR_HUNTER_API_KEY";
+const HUNTER_API_KEY = process.env.REACT_APP_HUNTER_API_KEY;
+const GEMINI_API_KEY = process.env.REACT_APP_GEMINI_API_KEY;
 
 const MESSAGE_STYLE_MAP = {
   Alumni: { style: "conversational", label: "Warm & Personal" },
@@ -88,15 +89,32 @@ const TC = {
 // APP
 // ═══════════════════════════════════════════════════
 export default function CareerCompass() {
+  const backendBase = `${window.location.protocol}//${window.location.hostname}:3001`;
+  const apiBase = "/api";
+  const readStoredJson = (key, fallback) => {
+    try {
+      const raw = window.localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
   const [pg, setPg] = useState("landing");
-  const [profile, setProfile] = useState(null);
-  const [resume, setResume] = useState("");
+  const [profile, setProfile] = useState(() => readStoredJson("careercompass_profile", null));
+  const [resume, setResume] = useState(() => {
+    try {
+      return window.localStorage.getItem("careercompass_resume") || "";
+    } catch {
+      return "";
+    }
+  });
   const [selCo, setSelCo] = useState(null);
   const [selCt, setSelCt] = useState(null);
   const [tracker, setTracker] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [msgPlat, setMsgPlat] = useState("linkedin");
+  const [showFullMsg, setShowFullMsg] = useState(false);
   const [chat, setChat] = useState([]);
   const [chatIn, setChatIn] = useState("");
   const [simCt, setSimCt] = useState(null);
@@ -109,22 +127,260 @@ export default function CareerCompass() {
   const [nFilt, setNFilt] = useState("all");
   const [autoStep, setAutoStep] = useState(-1);
   const [foundEmail, setFoundEmail] = useState(null);
+  const [automationStatus, setAutomationStatus] = useState(null);
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [trackerBusy, setTrackerBusy] = useState(false);
+  const [trackerError, setTrackerError] = useState("");
+  const [trackerMessage, setTrackerMessage] = useState("");
+  const [oauthTrackerTriggered, setOauthTrackerTriggered] = useState(false);
+  const [companyPeople, setCompanyPeople] = useState([]);
+  const [companySearchBusy, setCompanySearchBusy] = useState(false);
+  const [companySearchError, setCompanySearchError] = useState("");
+  const [peopleFilt, setPeopleFilt] = useState({ name: "", role: "", type: "", minConfidence: 0 });
   const chatEnd = useRef(null);
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
+  useEffect(() => { refreshAutomationStatus(); }, []);
+  useEffect(() => { if (profile?.name) syncProfileToAutomation(profile); }, [profile]);
+  useEffect(() => {
+    try {
+      if (profile) window.localStorage.setItem("careercompass_profile", JSON.stringify(profile));
+      else window.localStorage.removeItem("careercompass_profile");
+    } catch {}
+  }, [profile]);
+  useEffect(() => {
+    try {
+      if (resume) window.localStorage.setItem("careercompass_resume", resume);
+      else window.localStorage.removeItem("careercompass_resume");
+    } catch {}
+  }, [resume]);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("gmail") === "connected" && automationStatus?.gmailConnected && !oauthTrackerTriggered) {
+      setOauthTrackerTriggered(true);
+      if (profile?.name) setPg("dashboard");
+      runTrackerPipeline({ silent: true });
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, [automationStatus, oauthTrackerTriggered, profile]);
+
+  const refreshAutomationStatus = async () => {
+    try {
+      const response = await fetch(`${apiBase}/automation/status`);
+      const data = await response.json();
+      if (!profile?.name && data.profile?.name) {
+        setProfile(data.profile);
+      }
+      setAutomationStatus(data);
+      return data;
+    } catch {
+      setAutomationStatus(null);
+      return null;
+    }
+  };
+
+  const syncProfileToAutomation = async (nextProfile) => {
+    try {
+      const response = await fetch(`${apiBase}/profile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile: nextProfile, resumeText: resume }),
+      });
+      if (!response.ok) {
+        throw new Error("Profile sync failed.");
+      }
+      return await refreshAutomationStatus();
+    } catch {}
+    return null;
+  };
+
+  const connectGmailAutomation = () => {
+    window.location.href = `${backendBase}/api/google/oauth/start`;
+  };
+
+  const runNightlyAutomationNow = async (silent = false) => {
+    setAutomationBusy(true);
+    try {
+      const response = await fetch(`${apiBase}/automation/run`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Automation run failed.");
+      await refreshAutomationStatus();
+      if (!silent) alert(`Tracker finished. Applications found: ${data.result?.applicationsFound || 0}. Drafts ready for review: ${data.result?.draftsPrepared || 0}.`);
+    } catch (error) {
+      if (!silent) alert(error.message || "Automation run failed.");
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const approveOutreachDrafts = async (draftIds = []) => {
+    setApprovalBusy(true);
+    try {
+      const response = await fetch(`${apiBase}/automation/send-approved`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draftIds }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Sending approved drafts failed.");
+      await refreshAutomationStatus();
+      alert(`Sent ${data.result?.sentCount || 0} email${(data.result?.sentCount || 0) === 1 ? "" : "s"}.`);
+    } catch (error) {
+      alert(error.message || "Sending approved drafts failed.");
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
+
+  const syncApplications = async ({ silent = false } = {}) => {
+    setTrackerBusy(true);
+    setTrackerError("");
+    if (!silent) setTrackerMessage("");
+    try {
+      const response = await fetch(`${apiBase}/applications/sync`, { method: "POST" });
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("text/html")) {
+        throw new Error("Backend not reachable. Make sure `npm run server` is running on port 3001.");
+      }
+      const data = await response.json();
+      if (!response.ok || data.ok === false) {
+        throw new Error(data.error || "Application sync failed.");
+      }
+      await refreshAutomationStatus();
+      const count = data.applications?.length || 0;
+      if (!silent) {
+        setTrackerMessage(
+          count
+            ? `Found ${count} application${count === 1 ? "" : "s"} in your Gmail.`
+            : "No application emails detected in the last 30 days."
+        );
+      }
+      return data;
+    } catch (error) {
+      const nextError = error.message || "Application sync failed.";
+      setTrackerError(nextError);
+      throw new Error(nextError);
+    } finally {
+      setTrackerBusy(false);
+    }
+  };
+
+  const runTrackerPipeline = async ({ silent = false } = {}) => {
+    if (!automationStatus?.gmailConnected) {
+      connectGmailAutomation();
+      return;
+    }
+
+    setTrackerError("");
+    if (!silent) setTrackerMessage("Running pipeline...");
+
+    try {
+      const syncData = await syncApplications({ silent: true });
+      const applicationsFound = syncData?.applications?.length || 0;
+      let latestStatus = automationStatus;
+      if (profile?.name) {
+        latestStatus = await syncProfileToAutomation(profile) || latestStatus;
+      } else {
+        latestStatus = await refreshAutomationStatus() || latestStatus;
+      }
+
+      if (!latestStatus?.profileSynced) {
+        setTrackerMessage(
+          applicationsFound
+            ? `Tracked ${applicationsFound} application${applicationsFound === 1 ? "" : "s"} from Gmail. Add or restore your profile to prepare outreach drafts.`
+            : "No application emails were detected in Gmail."
+        );
+        return;
+      }
+
+      setAutomationBusy(true);
+      const response = await fetch(`${apiBase}/automation/run`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Pipeline run failed.");
+
+      await refreshAutomationStatus();
+      const applicationsFoundWithDrafts = data.result?.applicationsFound || applicationsFound;
+      const draftsPrepared = data.result?.draftsPrepared || 0;
+      setTrackerMessage(
+        `Pipeline complete. Tracked ${applicationsFoundWithDrafts} application${applicationsFoundWithDrafts === 1 ? "" : "s"} and prepared ${draftsPrepared} outreach draft${draftsPrepared === 1 ? "" : "s"} for review.`
+      );
+    } catch (error) {
+      const nextError = error.message || "Pipeline run failed.";
+      setTrackerError(nextError);
+      if (!silent) setTrackerMessage("");
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const searchCompanyPeople = async () => {
+    if (!coSearch.trim()) return;
+    setCompanySearchBusy(true);
+    setCompanySearchError("");
+    try {
+      const response = await fetch(`${apiBase}/hunter/company-search?q=${encodeURIComponent(coSearch.trim())}`);
+      if ((response.headers.get("content-type") || "").includes("text/html")) {
+        throw new Error("The backend returned HTML instead of JSON. Make sure `npm run server` is running on port 3001.");
+      }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Hunter search failed.");
+      setCompanyPeople(data.people || []);
+    } catch (error) {
+      setCompanyPeople([]);
+      setCompanySearchError(error.message || "Hunter search failed.");
+    } finally {
+      setCompanySearchBusy(false);
+    }
+  };
 
   // AI
   const ai = async (sys, usr) => {
     try {
-      const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: sys, messages: [{ role: "user", content: usr }] }) });
-      const d = await r.json(); return d.content?.[0]?.text || "No response.";
-    } catch { return "AI unavailable. Please retry."; }
+      if (!GEMINI_API_KEY) return "Gemini API key missing. Add REACT_APP_GEMINI_API_KEY to .env and restart the app.";
+      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: sys }] },
+          contents: [{ role: "user", parts: [{ text: usr }] }],
+          generationConfig: { maxOutputTokens: 1000 },
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) return d.error?.message || "Gemini request failed.";
+      return d.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("").trim() || "No response.";
+    } catch {
+      return "AI unavailable. Please retry.";
+    }
   };
   const aiChat = async (sys, msgs) => {
     try {
-      const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: sys, messages: msgs }) });
-      const d = await r.json(); return d.content?.[0]?.text || "No response.";
-    } catch { return "AI unavailable."; }
+      if (!GEMINI_API_KEY) return "Gemini API key missing. Add REACT_APP_GEMINI_API_KEY to .env and restart the app.";
+      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: sys }] },
+          contents: msgs.map((msg) => ({
+            role: msg.role === "assistant" ? "model" : "user",
+            parts: [{ text: msg.content }],
+          })),
+          generationConfig: { maxOutputTokens: 1000 },
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) return d.error?.message || "Gemini request failed.";
+      return d.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("").trim() || "No response.";
+    } catch {
+      return "AI unavailable.";
+    }
   };
 
   const extractProfile = async () => {
@@ -140,9 +396,15 @@ export default function CareerCompass() {
     const st = MESSAGE_STYLE_MAP[contact.type]?.style || "conversational";
     const limit = platform === "linkedin" ? "STRICTLY under 300 characters. LinkedIn connection request note." : "Email format, 150-250 words.";
     const guide = st === "direct" ? "Professional, direct. State interest, highlight qualifications, ask for next step." : st === "curiosity" ? "Lead with curiosity about their experience. Ask thoughtful questions. Warm." : "Warm, personal. Find common ground. Build rapport. Don't ask for favors upfront.";
-    const r = await ai(`Networking message expert. Write ${st} ${platform} message.\nRules: Never start with "I came across" or "I hope this finds you well". No em dashes. ${limit} ${guide} Reference specific details. Feel human. Goal: referral/job.`,
+    const r = await ai(`Networking message expert. Write ${st} ${platform} message.\nRules: Never start with "I came across" or "I hope this finds you well". No em dashes. ${limit} ${guide} Reference specific details. Feel human. Goal: referral/job. Use the sender information exactly as provided. Do not use placeholders such as [Your Name], [University], [Company], or [Title]. Write the full finished draft only.`,
       `SENDER: ${profile.name}, ${profile.title}. Skills: ${profile.skills?.join(", ")}. Education: ${profile.education?.map(e=>`${e.degree}, ${e.school}`).join("; ")}. Location: ${profile.location}.\nRECIPIENT: ${contact.name}, ${contact.role} at ${contact.company}. Type: ${contact.type}. School: ${contact.school}. Bio: ${contact.bio}.\nPlatform: ${platform}. ${platform==="linkedin"?"MUST be under 300 characters.":""}`);
-    setMsg(r); setBusy(false);
+    const cleaned = r
+      .replace(/\[Your Name\]/gi, profile.name || "")
+      .replace(/\[Your Title\]/gi, profile.title || "")
+      .replace(/\[University\]/gi, profile.education?.[0]?.school || "")
+      .replace(/\[Company\]/gi, contact.company || "")
+      .replace(/\[Title\]/gi, profile.title || "");
+    setMsg(cleaned); setBusy(false);
   };
 
   const startSim = (ct) => { setSimCt(ct); setChat([{ role:"assistant", content:`Hi! Thanks for setting up this chat. I'm ${ct.name}, ${ct.role} at ${ct.company}. Tell me about yourself, what got you interested in this field?` }]); setChatSum(""); setPg("sim"); };
@@ -260,6 +522,13 @@ export default function CareerCompass() {
   const filtNotif = NOTIFICATIONS.filter(n => nFilt==="all"?true:n.type===nFilt);
   const allCts = Object.values(DEMO_CONTACTS).flat();
   const searchCts = coSearch ? allCts.filter(c => c.company.toLowerCase().includes(coSearch.toLowerCase())||c.name.toLowerCase().includes(coSearch.toLowerCase())||c.role.toLowerCase().includes(coSearch.toLowerCase())) : [];
+  const filtCompanyPeople = companyPeople.filter((person) => {
+    if (peopleFilt.name && !person.name.toLowerCase().includes(peopleFilt.name.toLowerCase())) return false;
+    if (peopleFilt.role && !person.role.toLowerCase().includes(peopleFilt.role.toLowerCase())) return false;
+    if (peopleFilt.type && person.type !== peopleFilt.type) return false;
+    if ((person.confidence || 0) < Number(peopleFilt.minConfidence || 0)) return false;
+    return true;
+  });
 
   // ═══ STYLES ═══
   const btn = (v="primary") => ({ padding:"10px 20px", borderRadius:"10px", border:"none", fontWeight:600, fontSize:"14px", cursor:"pointer", transition:"all 0.15s", fontFamily:"inherit",
@@ -272,6 +541,7 @@ export default function CareerCompass() {
   const tag = { padding:"3px 10px",borderRadius:"6px",background:C.primaryLight,color:C.primaryDark,fontSize:"12px",fontWeight:500 };
   const tab = (a) => ({ padding:"8px 18px",borderRadius:"8px",border:"none",background:a?C.primary:"transparent",color:a?"#fff":C.sub,fontWeight:600,fontSize:"13px",cursor:"pointer",fontFamily:"inherit" });
   const mbox = { background:"#fafaf9",borderRadius:"10px",border:`1px solid ${C.border}`,padding:"16px",fontSize:"14px",lineHeight:1.7,color:C.text,whiteSpace:"pre-wrap" };
+  const mboxArea = (platform) => ({ ...mbox, width:"100%",resize:"vertical",overflowY:"auto",minHeight:platform==="email"?"220px":"140px",fontFamily:"inherit",outline:"none" });
   const sDot = (st) => ({ width:9,height:9,borderRadius:"50%",flexShrink:0,background:st==="Replied"?C.ok:st==="Sent"?C.info:st==="Coffee Chat Scheduled"?C.accent:st==="Referral Received"?C.purple:C.muted });
 
   const wrap = { maxWidth:"1060px",margin:"0 auto",padding:"28px 24px",animation:"fadeIn 0.3s ease" };
@@ -315,12 +585,95 @@ export default function CareerCompass() {
         <div style={{ textAlign:"center",padding:"80px 24px 40px",animation:"fadeIn 0.4s ease" }}>
           <div style={{ display:"inline-flex",padding:"5px 14px",borderRadius:"20px",background:C.primaryLight,fontSize:"13px",color:C.primaryDark,fontWeight:600,marginBottom:"20px",gap:"6px",alignItems:"center" }}>🧭 AI-Powered Networking Agent</div>
           <h1 style={{ fontSize:"46px",fontWeight:800,lineHeight:1.15,marginBottom:"14px",maxWidth:"650px",margin:"0 auto 14px" }}>Stop applying blindly.<br/>Start <span style={{color:C.primary}}>connecting</span> smartly.</h1>
-          <p style={{ fontSize:"17px",color:C.sub,maxWidth:"520px",margin:"0 auto 36px",lineHeight:1.7 }}>CareerCompass finds the right people, crafts the perfect message, tracks every reply, and coaches you through coffee chats.</p>
+          <p style={{ fontSize:"17px",color:C.sub,maxWidth:"620px",margin:"0 auto 36px",lineHeight:1.7 }}>CareerCompass tracks the companies you applied to, finds the right people inside them, crafts the perfect message, and coaches you through coffee chats.</p>
           <button style={btn("primary")} onClick={()=>setPg("onboard")}>Get Started →</button>
           <div style={{ maxWidth:"880px",margin:"24px auto 0",display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:"14px",padding:"0 24px" }}>
             {[{i:"🎯",t:"Smart Discovery",d:"AI finds alumni, team leads, recruiters at your target companies"},{i:"✉️",t:"Tailored Outreach",d:"LinkedIn notes under 300 chars. Emails with depth. Auto-matched style."},{i:"🤖",t:"Coffee Chat Sim",d:"Practice with an AI that role-plays as your actual contact"}].map((f,idx)=>(
               <div key={idx} style={card}><div style={{fontSize:"26px",marginBottom:"10px"}}>{f.i}</div><h3 style={{fontSize:"15px",fontWeight:700,marginBottom:"6px"}}>{f.t}</h3><p style={{fontSize:"13px",color:C.sub,lineHeight:1.5}}>{f.d}</p></div>
             ))}
+          </div>
+          <div style={{maxWidth:"880px",margin:"20px auto 0",padding:"0 24px"}}>
+            <div style={{...card,textAlign:"left",background:"#fffcf2",border:`1px solid ${C.accent}44`}}>
+              <p style={{fontSize:"11px",fontWeight:700,letterSpacing:"0.08em",textTransform:"uppercase",color:C.accent,marginBottom:"8px"}}>JobTracker</p>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"16px",flexWrap:"wrap"}}>
+                <div>
+                  <h3 style={{fontSize:"20px",fontWeight:800,marginBottom:"6px"}}>Track all the companies you applied to</h3>
+                  <p style={{fontSize:"13px",color:C.sub,lineHeight:1.6,maxWidth:"560px"}}>CareerCompass keeps your application trail in one place, detects the company, and tees up the next move: find insiders, draft outreach, and send a gentle internal nudge.</p>
+                </div>
+                <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                  {!automationStatus?.gmailConnected && <button style={btn("ghost")} onClick={connectGmailAutomation}>Connect Gmail</button>}
+                  <button style={btn("secondary")} onClick={() => runTrackerPipeline()} disabled={trackerBusy || automationBusy}>
+                    {!automationStatus?.gmailConnected ? "Connect Gmail To Run Pipeline" : trackerBusy || automationBusy ? "Running Pipeline..." : "Run Pipeline"}
+                  </button>
+                </div>
+              </div>
+              {(trackerError || trackerMessage) && (
+                <div style={{marginTop:"12px",padding:"10px 14px",borderRadius:"10px",fontSize:"12px",background:trackerError?C.errLight:C.primaryLight,color:trackerError?C.err:C.primaryDark,border:`1px solid ${trackerError?C.err+"33":C.primary+"33"}`}}>
+                  {trackerError || trackerMessage}
+                </div>
+              )}
+              <div style={{marginTop:"12px",display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:"8px"}}>
+                {[
+                  { label: "Gmail", value: automationStatus?.gmailConnected ? "Connected" : "Not connected" },
+                  { label: "Profile", value: automationStatus?.profileSynced ? "Synced" : "Not synced" },
+                  { label: "Tracked", value: `${automationStatus?.applications?.length || 0} apps` },
+                  { label: "Drafts", value: `${automationStatus?.pendingOutreach?.length || 0} ready` },
+                ].map((item) => (
+                  <div key={item.label} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:"10px",padding:"10px 12px"}}>
+                    <p style={{fontSize:"11px",color:C.muted,marginBottom:"4px",textTransform:"uppercase",letterSpacing:"0.04em"}}>{item.label}</p>
+                    <p style={{fontSize:"13px",fontWeight:700,margin:0}}>{item.value}</p>
+                  </div>
+                ))}
+              </div>
+              {automationStatus?.applications?.length ? (
+                <div style={{marginTop:"16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:"8px"}}>
+                    <p style={{fontSize:"12px",fontWeight:700,color:C.sub,margin:0}}>{automationStatus.applications.length} application{automationStatus.applications.length === 1 ? "" : "s"} tracked from Gmail</p>
+                    <div style={{display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+                      {automationStatus?.pendingOutreach?.length ? <p style={{fontSize:"11px",color:C.primaryDark,margin:0,fontWeight:700}}>{automationStatus.pendingOutreach.length} draft{automationStatus.pendingOutreach.length === 1 ? "" : "s"} ready</p> : null}
+                      {automationStatus?.lastSyncAt && <p style={{fontSize:"11px",color:C.muted,margin:0}}>Last sync: {new Date(automationStatus.lastSyncAt).toLocaleString()}</p>}
+                    </div>
+                  </div>
+                  <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:"12px",overflow:"hidden"}}>
+                    <div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,3fr) minmax(0,1fr)",gap:"12px",padding:"10px 14px",background:"#fafaf9",borderBottom:`1px solid ${C.border}`,fontSize:"11px",fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:"0.04em"}}>
+                      <span>Company</span>
+                      <span>Role / Title</span>
+                      <span style={{textAlign:"right"}}>Applied</span>
+                    </div>
+                    {automationStatus.applications.map((appItem, i) => (
+                      <div key={appItem.id || `${appItem.company}-${i}`} style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,3fr) minmax(0,1fr)",gap:"12px",padding:"12px 14px",borderTop:i===0?"none":`1px solid ${C.border}`,alignItems:"center"}}>
+                        <div style={{display:"flex",gap:"10px",alignItems:"center",minWidth:0}}>
+                          <div style={{...av(C.info),width:"32px",height:"32px",fontSize:"13px",flexShrink:0}}>{appItem.company?.[0]?.toUpperCase() || "?"}</div>
+                          <p style={{fontSize:"13px",fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{appItem.company}</p>
+                        </div>
+                        <div style={{minWidth:0}}>
+                          <p style={{fontSize:"13px",fontWeight:600,margin:0,color:appItem.role?C.text:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{appItem.role || "Role not detected"}</p>
+                          <p style={{fontSize:"11px",color:C.muted,margin:"2px 0 0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{appItem.subject}</p>
+                        </div>
+                        <span style={{fontSize:"12px",color:C.sub,textAlign:"right",whiteSpace:"nowrap"}}>{appItem.date ? new Date(appItem.date).toLocaleDateString() : "—"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:"12px",marginTop:"16px"}}>
+                  {[
+                    { company:"Google", role:"Data Engineer", status:"Applied", next:"Find alumni and recruiter" },
+                    { company:"Amazon", role:"Business Intelligence Engineer", status:"Application Received", next:"Draft internal nudge email" },
+                    { company:"Meta", role:"Data Analyst", status:"Follow-up Due", next:"Send gentle reminder tonight" },
+                  ].map((item) => (
+                    <div key={item.company} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:"12px",padding:"14px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"8px"}}>
+                        <h4 style={{fontSize:"14px",fontWeight:800,margin:0}}>{item.company}</h4>
+                        <span style={{fontSize:"10px",fontWeight:700,padding:"4px 8px",borderRadius:"999px",background:item.status==="Follow-up Due"?C.accentLight:C.primaryLight,color:item.status==="Follow-up Due"?C.accent:C.primaryDark}}>{item.status}</span>
+                      </div>
+                      <p style={{fontSize:"12px",color:C.text,marginTop:"8px"}}>{item.role}</p>
+                      <p style={{fontSize:"12px",color:C.sub,marginTop:"8px"}}>{item.next}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -348,6 +701,133 @@ export default function CareerCompass() {
               <button style={btn("ghost")} onClick={()=>setPg("onboard")}>Edit</button>
             </div>
             <div style={{display:"flex",flexWrap:"wrap",gap:"6px",marginTop:"12px"}}>{profile.skills?.map((sk,i)=><span key={i} style={tag}>{sk}</span>)}</div>
+          </div>
+
+          <div style={{...card,border:`1px solid ${C.primary}33`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"16px",flexWrap:"wrap"}}>
+              <div>
+                <h2 style={{fontSize:"18px",fontWeight:800,marginBottom:"6px"}}>Gmail Automation Agent</h2>
+                <p style={{fontSize:"13px",color:C.sub,lineHeight:1.6,maxWidth:"760px"}}>
+                  Runs nightly at 11:00 PM, checks Gmail for application-related messages, detects companies and roles from those emails, finds likely contacts, and drafts outreach emails from your own Gmail account. Each run is capped at {automationStatus?.maxApplicationsPerRun || 10} tracked applications and {automationStatus?.maxOutreachPerRun || 10} outreach drafts, and nothing is sent until you approve it.
+                </p>
+              </div>
+              <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                <button style={btn("secondary")} onClick={refreshAutomationStatus}>Refresh Status</button>
+                {!automationStatus?.gmailConnected && <button style={btn("ghost")} onClick={connectGmailAutomation}>Connect Gmail</button>}
+                <button style={btn("secondary")} onClick={syncApplications} disabled={trackerBusy || !automationStatus?.gmailConnected}>{trackerBusy ? "Syncing..." : "Sync Applications"}</button>
+                <button style={btn("primary")} onClick={() => runTrackerPipeline()} disabled={trackerBusy || automationBusy || !automationStatus?.gmailConnected}>{trackerBusy || automationBusy ? "Running..." : "Run Pipeline"}</button>
+                <button style={btn("amber")} onClick={() => approveOutreachDrafts()} disabled={approvalBusy || !automationStatus?.gmailConnected || !automationStatus?.pendingOutreach?.length}>{approvalBusy ? "Sending..." : "Send All Approved"}</button>
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(6,minmax(0,1fr))",gap:"10px",marginTop:"14px"}}>
+              {[
+                { label:"OAuth", value: automationStatus?.gmailConnected ? "Connected" : "Not connected" },
+                { label:"Profile", value: automationStatus?.profileSynced ? "Synced" : "Not synced" },
+                { label:"Last Sync", value: automationStatus?.lastSyncAt ? new Date(automationStatus.lastSyncAt).toLocaleString() : "Never" },
+                { label:"Schedule", value: automationStatus?.schedule?.description || "Every night at 11:00 PM" },
+                { label:"Track Limit", value: `${automationStatus?.maxApplicationsPerRun || 10} applications` },
+                { label:"Draft Queue", value: `${automationStatus?.pendingOutreach?.length || 0} ready` },
+                { label:"Last Run", value: automationStatus?.lastRunAt ? new Date(automationStatus.lastRunAt).toLocaleString() : "Never" },
+              ].map((item) => (
+                <div key={item.label} style={{background:"#fafaf9",border:`1px solid ${C.border}`,borderRadius:"12px",padding:"12px 14px"}}>
+                  <p style={{fontSize:"11px",color:C.muted,marginBottom:"4px"}}>{item.label}</p>
+                  <p style={{fontSize:"13px",fontWeight:700}}>{item.value}</p>
+                </div>
+              ))}
+            </div>
+            {!!automationStatus?.applications?.length && (
+              <div style={{marginTop:"18px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:"10px"}}>
+                  <h3 style={{fontSize:"15px",fontWeight:800,margin:0}}>📬 Job Tracker</h3>
+                  <span style={{fontSize:"12px",color:C.sub}}>{automationStatus.applications.length} job{automationStatus.applications.length === 1 ? "" : "s"} applied</span>
+                </div>
+                <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:"12px",overflow:"hidden"}}>
+                  <div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,3fr) minmax(0,1fr)",gap:"12px",padding:"10px 14px",background:"#fafaf9",borderBottom:`1px solid ${C.border}`,fontSize:"11px",fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:"0.04em"}}>
+                    <span>Company</span>
+                    <span>Role / Title</span>
+                    <span style={{textAlign:"right"}}>Applied</span>
+                  </div>
+                  {automationStatus.applications.map((appItem, i) => (
+                    <div key={appItem.id || `${appItem.company}-${i}`} style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,3fr) minmax(0,1fr)",gap:"12px",padding:"12px 14px",borderTop:i===0?"none":`1px solid ${C.border}`,alignItems:"center"}}>
+                      <div style={{display:"flex",gap:"10px",alignItems:"center",minWidth:0}}>
+                        <div style={{...av(C.info),width:"32px",height:"32px",fontSize:"13px",flexShrink:0}}>{appItem.company?.[0]?.toUpperCase() || "?"}</div>
+                        <p style={{fontSize:"13px",fontWeight:700,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{appItem.company}</p>
+                      </div>
+                      <div style={{minWidth:0}}>
+                        <p style={{fontSize:"13px",fontWeight:600,margin:0,color:appItem.role?C.text:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{appItem.role || "Role not detected"}</p>
+                        <p style={{fontSize:"11px",color:C.muted,margin:"2px 0 0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{appItem.subject}</p>
+                      </div>
+                      <span style={{fontSize:"12px",color:C.sub,textAlign:"right",whiteSpace:"nowrap"}}>{appItem.date ? new Date(appItem.date).toLocaleDateString() : "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {!!automationStatus?.pendingOutreach?.length && (
+              <div style={{marginTop:"14px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"12px",flexWrap:"wrap",marginBottom:"8px"}}>
+                  <h3 style={{fontSize:"14px",fontWeight:700,margin:0}}>Pending Approval</h3>
+                  <p style={{fontSize:"12px",color:C.sub,margin:0}}>Review these drafts before they are sent from your Gmail.</p>
+                </div>
+                <div style={{display:"grid",gap:"10px"}}>
+                  {automationStatus.pendingOutreach.map((draft) => (
+                    <div key={draft.id} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:"12px",padding:"14px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"12px",flexWrap:"wrap"}}>
+                        <div>
+                          <p style={{fontSize:"13px",fontWeight:800}}>{draft.company}{draft.appliedRole ? ` · ${draft.appliedRole}` : ""}</p>
+                          <p style={{fontSize:"12px",color:C.text,marginTop:"4px"}}>{draft.contactName} {draft.role ? `(${draft.role})` : ""}</p>
+                          <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>To: {draft.to}</p>
+                          <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>Subject: {draft.subject}</p>
+                        </div>
+                        <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+                          {draft.bucket && <span style={badge(draft.bucket === "manager" ? "Hiring Manager" : draft.bucket === "recruiter" ? "Recruiter" : "Industry Peer")}>{draft.bucket}</span>}
+                          <button style={{...btn("secondary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>navigator.clipboard?.writeText(`To: ${draft.to}\nSubject: ${draft.subject}\n\n${draft.body}`)}>Copy Draft</button>
+                          <button style={{...btn("primary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>approveOutreachDrafts([draft.id])} disabled={approvalBusy}>{approvalBusy ? "Sending..." : "Approve & Send"}</button>
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          marginTop: "10px",
+                          padding: "12px 14px",
+                          background: "#fafaf9",
+                          border: `1px solid ${C.border}`,
+                          borderRadius: "10px",
+                          whiteSpace: "pre-wrap",
+                          fontSize: "12px",
+                          lineHeight: 1.6,
+                          color: C.text,
+                        }}
+                      >
+                        {draft.body}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {!!automationStatus?.outreachLog?.length && (
+              <div style={{marginTop:"14px"}}>
+                <h3 style={{fontSize:"14px",fontWeight:700,marginBottom:"8px"}}>Sent Outreach</h3>
+                <div style={{display:"grid",gap:"8px"}}>
+                  {automationStatus.outreachLog.slice(0, 10).map((entry, index) => (
+                    <div key={`${entry.gmailMessageId || entry.to}-${index}`} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:"12px",padding:"12px 14px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"12px",flexWrap:"wrap"}}>
+                        <div>
+                          <p style={{fontSize:"13px",fontWeight:800}}>{entry.company}{entry.appliedRole ? ` · ${entry.appliedRole}` : ""}</p>
+                          <p style={{fontSize:"12px",color:C.text,marginTop:"4px"}}>{entry.contactName} {entry.role ? `(${entry.role})` : ""}</p>
+                          <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>Sent to: {entry.to}</p>
+                          <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>{entry.subject}</p>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          {entry.bucket && <p style={{fontSize:"11px",fontWeight:700,color:C.primary,marginBottom:"4px"}}>{entry.bucket}</p>}
+                          <p style={{fontSize:"11px",color:C.muted}}>{entry.sentAt ? new Date(entry.sentAt).toLocaleString() : ""}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <h2 style={{fontSize:"18px",fontWeight:700,marginTop:"28px",marginBottom:"12px"}}>Target Companies</h2>
@@ -413,7 +893,7 @@ export default function CareerCompass() {
                             </p>
                           </div>
                           {msgPlat==="linkedin"&&msg.length>300 && <p style={{fontSize:"12px",color:C.err,fontWeight:600,marginBottom:"6px"}}>⚠️ Over 300 chars</p>}
-                          <div style={mbox}>{msg}</div>
+                          <textarea readOnly value={msg} style={mboxArea(msgPlat)} onClick={()=>setShowFullMsg(true)} title="Click to view the full message" />
                           <div style={{marginTop:"10px",display:"flex",gap:"8px"}}>
                             {/* Copy icon */}
                             <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px",transition:"all 0.15s",boxShadow:C.shadow}} title="Copy message" onClick={()=>navigator.clipboard.writeText(msg)}>📋</button>
@@ -433,6 +913,21 @@ export default function CareerCompass() {
             </div>
           )}
 
+
+          {showFullMsg && msg && (
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:250,display:"flex",alignItems:"center",justifyContent:"center",padding:"24px"}} onClick={()=>setShowFullMsg(false)}>
+              <div style={{background:"#fff",borderRadius:"18px",width:"min(760px, 96vw)",maxHeight:"85vh",padding:"20px",boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}} onClick={e=>e.stopPropagation()}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px",gap:"12px"}}>
+                  <div>
+                    <h3 style={{fontSize:"18px",fontWeight:800,margin:0}}>{msgPlat==="linkedin"?"Full LinkedIn Message":"Full Email Message"}</h3>
+                    <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>{msgPlat==="linkedin"?`${msg.length}/300 chars`:"Full draft"}</p>
+                  </div>
+                  <button style={{...btn("ghost"),padding:"8px 12px",border:`1px solid ${C.border}`}} onClick={()=>setShowFullMsg(false)}>Close</button>
+                </div>
+                <textarea readOnly value={msg} style={{...mboxArea(msgPlat),minHeight:"55vh"}} />
+              </div>
+            </div>
+          )}
 
           {autoStep>=0 && (
             <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn 0.2s ease"}}>
@@ -528,13 +1023,26 @@ export default function CareerCompass() {
             ))}
           </>}
           {sTab==="people" && <>
-            <div style={{...card,padding:"16px"}}><input style={inp} placeholder="Search company, name, or role..." value={coSearch} onChange={e=>setCoSearch(e.target.value)} /></div>
-            {coSearch && searchCts.length>0 ? searchCts.map(ct=>(
-              <div key={ct.id} style={{...card,padding:"16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{display:"flex",gap:"10px",alignItems:"center"}}><div style={av()}>{ct.name[0]}</div><div><h3 style={{fontSize:"14px",fontWeight:700,margin:0}}>{ct.name}</h3><p style={{fontSize:"12px",color:C.sub}}>{ct.role} at {ct.company}</p></div></div>
-                <div style={{display:"flex",gap:"6px"}}><span style={badge(ct.type)}>{ct.type}</span><button style={{...btn("primary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>{setSelCo(ct.company);setSelCt(ct);setPg("dashboard");}}>View →</button></div>
+            <div style={{...card,padding:"16px",display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap"}}><input style={{...inp,flex:"1 1 280px"}} placeholder="Search company or domain..." value={coSearch} onChange={e=>setCoSearch(e.target.value)} /><button style={btn("primary")} onClick={searchCompanyPeople} disabled={companySearchBusy || !coSearch.trim()}>{companySearchBusy ? "Searching..." : "Search Hunter"}</button></div>
+            {companySearchError && <div style={{...card,padding:"14px",background:C.errLight,border:`1px solid ${C.err}33`,color:C.err}}>{companySearchError}</div>}
+            {companyPeople.length>0 && <div style={{...card,padding:"16px",display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap"}}>
+              <input style={{...inp,width:"200px"}} placeholder="Filter by name..." value={peopleFilt.name} onChange={e=>setPeopleFilt(p=>({...p,name:e.target.value}))} />
+              <input style={{...inp,width:"220px"}} placeholder="Filter by role..." value={peopleFilt.role} onChange={e=>setPeopleFilt(p=>({...p,role:e.target.value}))} />
+              <select style={sel} value={peopleFilt.type} onChange={e=>setPeopleFilt(p=>({...p,type:e.target.value}))}><option value="">All types</option><option>Recruiter</option><option>Hiring Manager</option><option>Industry Peer</option></select>
+              <select style={sel} value={peopleFilt.minConfidence} onChange={e=>setPeopleFilt(p=>({...p,minConfidence:Number(e.target.value)}))}><option value={0}>Any confidence</option><option value={70}>70%+</option><option value={80}>80%+</option><option value={90}>90%+</option></select>
+              <span style={{fontSize:"12px",color:C.muted,marginLeft:"auto"}}>{filtCompanyPeople.length} people</span>
+            </div>}
+            {companyPeople.length>0 && filtCompanyPeople.length===0 && <div style={{...card,padding:"18px",textAlign:"center",color:C.muted}}>No people match the current filters.</div>}
+            {filtCompanyPeople.length>0 ? filtCompanyPeople.map(ct=>(
+              <div key={ct.id} style={{...card,padding:"16px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:"12px"}}>
+                <div style={{display:"flex",gap:"10px",alignItems:"center"}}><div style={av()}>{ct.name[0]}</div><div><h3 style={{fontSize:"14px",fontWeight:700,margin:0}}>{ct.name}</h3><p style={{fontSize:"12px",color:C.sub}}>{ct.role} at {ct.company}</p><p style={{fontSize:"12px",color:C.text,marginTop:"4px"}}>{ct.email}</p><p style={{fontSize:"11px",color:C.muted,marginTop:"2px"}}>Hunter confidence: {ct.confidence}%</p></div></div>
+                <div style={{display:"flex",gap:"6px",alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+                  <span style={badge(ct.type)}>{ct.type}</span>
+                  <button style={{...btn("secondary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>navigator.clipboard?.writeText(ct.email)}>Copy Email</button>
+                  <button style={{...btn("primary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>{setSelCo(ct.company);setSelCt(ct);setPg("dashboard");}}>Use Contact</button>
+                </div>
               </div>
-            )) : <p style={{fontSize:"14px",color:C.muted,textAlign:"center",padding:"40px"}}>{coSearch?"No results.":"Type to search."}</p>}
+            )) : !companyPeople.length && <p style={{fontSize:"14px",color:C.muted,textAlign:"center",padding:"40px"}}>{coSearch?"Search Hunter to find people at this company.":"Type a company or domain and search Hunter."}</p>}
           </>}
         </div>
       )}
@@ -544,6 +1052,45 @@ export default function CareerCompass() {
         <div style={wrap}>
           <h1 style={{fontSize:"24px",fontWeight:800,marginBottom:"6px"}}>Networking Tracker</h1>
           <p style={{fontSize:"14px",color:C.sub,marginBottom:"16px"}}>Track outreach, replies, and follow-ups</p>
+          <div style={{...card,border:`1px solid ${C.primary}33`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"16px",flexWrap:"wrap"}}>
+              <div>
+                <h2 style={{fontSize:"18px",fontWeight:800,marginBottom:"6px"}}>Job Tracker</h2>
+                <p style={{fontSize:"13px",color:C.sub,lineHeight:1.6,maxWidth:"760px"}}>Connect Gmail, run the pipeline, and pull application emails into a reviewed list of companies, roles, and outreach drafts.</p>
+              </div>
+              <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                {!automationStatus?.gmailConnected && <button style={btn("ghost")} onClick={connectGmailAutomation}>Connect Gmail</button>}
+                <button style={btn("primary")} onClick={() => runTrackerPipeline()} disabled={trackerBusy || automationBusy}>
+                  {!automationStatus?.gmailConnected ? "Connect Gmail To Run Pipeline" : trackerBusy || automationBusy ? "Running Pipeline..." : "Run Pipeline"}
+                </button>
+              </div>
+            </div>
+            {(trackerError || trackerMessage) && (
+              <div style={{marginTop:"12px",padding:"10px 14px",borderRadius:"10px",fontSize:"12px",background:trackerError?C.errLight:C.primaryLight,color:trackerError?C.err:C.primaryDark,border:`1px solid ${trackerError?C.err+"33":C.primary+"33"}`}}>
+                {trackerError || trackerMessage}
+              </div>
+            )}
+            {!!automationStatus?.applications?.length ? (
+              <div style={{display:"grid",gap:"8px",marginTop:"14px"}}>
+                {automationStatus.applications.map((appItem) => (
+                  <div key={appItem.id || `${appItem.company}-${appItem.role || "role"}`} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:"12px",padding:"12px 14px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
+                      <div>
+                        <p style={{fontSize:"13px",fontWeight:800}}>{appItem.company}</p>
+                        {appItem.role && <p style={{fontSize:"12px",color:C.text,marginTop:"4px"}}>{appItem.role}</p>}
+                        <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>{appItem.subject || "Application signal detected from Gmail"}</p>
+                      </div>
+                      <span style={{fontSize:"11px",color:C.muted}}>{appItem.date ? new Date(appItem.date).toLocaleDateString() : ""}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{marginTop:"14px",background:"#fafaf9",border:`1px solid ${C.border}`,borderRadius:"12px",padding:"18px"}}>
+                <p style={{fontSize:"13px",color:C.sub}}>No tracked applications yet. Connect Gmail and run the tracker to detect companies and job titles from your application emails.</p>
+              </div>
+            )}
+          </div>
           <div style={{display:"flex",gap:"6px",marginBottom:"16px",flexWrap:"wrap"}}>{STATUS_LIST.map(st=><button key={st} style={tab(stFilt===st)} onClick={()=>setStFilt(st)}>{st}</button>)}</div>
           {filtTrack.length===0 ? <div style={{...card,textAlign:"center",padding:"50px"}}><p style={{fontSize:"32px",marginBottom:"10px"}}>📭</p><p style={{fontSize:"14px",color:C.sub}}>No contacts in this category.</p><button style={{...btn("primary"),marginTop:"14px"}} onClick={()=>setPg("dashboard")}>Discover Contacts →</button></div>
           : filtTrack.map((ct,i)=>(
