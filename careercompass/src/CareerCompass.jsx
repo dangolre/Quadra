@@ -5,7 +5,7 @@ import { useState, useEffect, useRef } from "react";
 // ═══════════════════════════════════════════════════
 // Replace with your real Hunter.io API key (free tier: 25 lookups/month)
 // Get one at https://hunter.io/api-keys
-const HUNTER_API_KEY = "YOUR_HUNTER_API_KEY";
+const HUNTER_API_KEY = process.env.REACT_APP_HUNTER_API_KEY;
 
 const MESSAGE_STYLE_MAP = {
   Alumni: { style: "conversational", label: "Warm & Personal" },
@@ -116,13 +116,13 @@ export default function CareerCompass() {
   // AI
   const ai = async (sys, usr) => {
     try {
-      const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: sys, messages: [{ role: "user", content: usr }] }) });
+      const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": process.env.REACT_APP_CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: sys, messages: [{ role: "user", content: usr }] }) });
       const d = await r.json(); return d.content?.[0]?.text || "No response.";
     } catch { return "AI unavailable. Please retry."; }
   };
   const aiChat = async (sys, msgs) => {
     try {
-      const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: sys, messages: msgs }) });
+      const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": process.env.REACT_APP_CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: sys, messages: msgs }) });
       const d = await r.json(); return d.content?.[0]?.text || "No response.";
     } catch { return "AI unavailable."; }
   };
@@ -285,7 +285,6 @@ export default function CareerCompass() {
         @keyframes spin{to{transform:rotate(360deg)}}
         *{margin:0;box-sizing:border-box}
         button:hover:not(:disabled){opacity:.88}
-        button[title]:hover{background:${C.primaryLight} !important;border-color:${C.primary} !important;transform:scale(1.08)}
         button:disabled{opacity:.5;cursor:not-allowed}
         input:focus,textarea:focus,select:focus{border-color:${C.primary};box-shadow:0 0 0 3px ${C.primary}22}
         ::selection{background:${C.primaryLight}}
@@ -372,57 +371,28 @@ export default function CareerCompass() {
                   {selCt?.id===ct.id && (
                     <div style={{marginTop:"14px",animation:"fadeIn 0.2s ease"}}>
                       <div style={{height:1,background:C.border,margin:"12px 0"}} />
-                      <div style={{display:"flex",gap:"12px",alignItems:"center"}}>
-                        {/* Email icon */}
-                        <button
-                          style={{width:44,height:44,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"20px",transition:"all 0.15s",boxShadow:C.shadow}}
-                          title="Find email & generate message"
-                          onClick={e=>{e.stopPropagation();lookupEmail(ct.name,ct.company);genMsg(ct,"email");addTrack(ct,"Sent");}}
-                        >✉️</button>
-                        {/* LinkedIn icon */}
-                        <button
-                          style={{width:44,height:44,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"20px",transition:"all 0.15s",boxShadow:C.shadow}}
-                          title="Generate LinkedIn connection note"
-                          onClick={e=>{e.stopPropagation();genMsg(ct,"linkedin");addTrack(ct,"Sent");}}
-                        >
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="#0077B5"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
-                        </button>
-                        {/* Mic icon */}
-                        <button
-                          style={{width:44,height:44,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"20px",transition:"all 0.15s",boxShadow:C.shadow}}
-                          title="Practice coffee chat"
-                          onClick={e=>{e.stopPropagation();startSim(ct);}}
-                        >🎙️</button>
+                      <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                        <button style={btn("primary")} onClick={e=>{e.stopPropagation();genMsg(ct,"linkedin");}}>🔗 LinkedIn (300 chars)</button>
+                        <button style={btn("secondary")} onClick={e=>{e.stopPropagation();genMsg(ct,"email");}}>✉️ Email</button>
+                        <button style={btn("ghost")} onClick={e=>{e.stopPropagation();startSim(ct);}}>🎙️ Practice Chat</button>
+                        <button style={{...btn("amber"),fontSize:"12px",padding:"8px 14px"}} onClick={e=>{e.stopPropagation();lookupEmail(ct.name,ct.company);}}>🔍 Find Email</button>
                       </div>
-
-                      {/* Email lookup result */}
                       {foundEmail && (
-                        <div style={{marginTop:"10px",padding:"10px 14px",background:foundEmail.confidence>50?C.okLight:C.accentLight,borderRadius:"10px",fontSize:"13px",animation:"fadeIn 0.3s ease",border:`1px solid ${foundEmail.confidence>50?C.ok+"33":C.accent+"33"}`}}>
-                          <span style={{fontWeight:700,color:foundEmail.confidence>50?C.ok:C.accent}}>📧 {foundEmail.email}</span>
-                          {foundEmail.verified && <span style={{marginLeft:"6px",fontSize:"11px",color:C.ok,fontWeight:600}}>✓ Verified</span>}
-                          <p style={{fontSize:"11px",color:C.sub,margin:"2px 0 0"}}>via {foundEmail.source}</p>
-                        </div>
-                      )}
-
-                      {/* Generated message inline */}
-                      {msg && selCt?.id===ct.id && (
-                        <div style={{marginTop:"12px",animation:"fadeIn 0.3s ease"}}>
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
-                            <p style={{fontSize:"12px",color:C.sub,margin:0}}>
-                              {msgPlat==="linkedin"?`LinkedIn note · ${msg.length}/300 chars`:"Email message"} · {MESSAGE_STYLE_MAP[ct.type]?.label}
-                            </p>
+                        <div style={{marginTop:"10px",padding:"12px 14px",background:foundEmail.confidence>50?C.okLight:C.accentLight,borderRadius:"10px",fontSize:"13px",animation:"fadeIn 0.3s ease",border:`1px solid ${foundEmail.confidence>50?C.ok+"33":C.accent+"33"}`}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <div>
+                              <span style={{fontWeight:700,color:foundEmail.confidence>50?C.ok:C.accent}}>📧 {foundEmail.email}</span>
+                              {foundEmail.verified && <span style={{marginLeft:"8px",fontSize:"11px",color:C.ok,fontWeight:600}}>✓ Verified</span>}
+                            </div>
+                            <span style={{fontSize:"11px",color:C.muted}}>
+                              {foundEmail.confidence > 0 ? `${foundEmail.confidence}% confidence` : ""}
+                            </span>
                           </div>
-                          {msgPlat==="linkedin"&&msg.length>300 && <p style={{fontSize:"12px",color:C.err,fontWeight:600,marginBottom:"6px"}}>⚠️ Over 300 chars</p>}
-                          <div style={mbox}>{msg}</div>
-                          <div style={{marginTop:"10px",display:"flex",gap:"8px"}}>
-                            {/* Copy icon */}
-                            <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px",transition:"all 0.15s",boxShadow:C.shadow}} title="Copy message" onClick={()=>navigator.clipboard.writeText(msg)}>📋</button>
-                            {/* Open LinkedIn icon */}
-                            {msgPlat==="linkedin" && <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s",boxShadow:C.shadow}} title="Open LinkedIn" onClick={()=>window.open(selCt.linkedin,"_blank")}><svg width="16" height="16" viewBox="0 0 24 24" fill="#0077B5"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg></button>}
-                            {/* Open Email icon */}
-                            {msgPlat==="email" && <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px",transition:"all 0.15s",boxShadow:C.shadow}} title="Open in email" onClick={()=>window.open(`mailto:${foundEmail?.email||selCt.email}?body=${encodeURIComponent(msg)}`,"_blank")}>📨</button>}
-                            {/* Auto-Connect icon */}
-                            {msgPlat==="linkedin" && <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.accent}`,background:C.accentLight,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px",transition:"all 0.15s",boxShadow:C.shadow}} title="Auto-Connect on LinkedIn" onClick={()=>runAuto(selCt)}>🤖</button>}
+                          <p style={{fontSize:"11px",color:C.sub,margin:"4px 0 0"}}>via {foundEmail.source}</p>
+                          {foundEmail.position && <p style={{fontSize:"11px",color:C.muted,margin:"2px 0 0"}}>Position: {foundEmail.position}</p>}
+                          <div style={{display:"flex",gap:"6px",marginTop:"8px"}}>
+                            <button style={{...btn("primary"),fontSize:"11px",padding:"5px 10px"}} onClick={e=>{e.stopPropagation();navigator.clipboard.writeText(foundEmail.email);}}>📋 Copy Email</button>
+                            <button style={{...btn("secondary"),fontSize:"11px",padding:"5px 10px"}} onClick={e=>{e.stopPropagation();window.open(`mailto:${foundEmail.email}`,"_blank");}}>✉️ Send Email</button>
                           </div>
                         </div>
                       )}
@@ -433,6 +403,23 @@ export default function CareerCompass() {
             </div>
           )}
 
+          {msg && selCt && (
+            <div style={{marginTop:"20px",animation:"fadeIn 0.3s ease"}}>
+              <div style={card}>
+                <h3 style={{fontSize:"15px",fontWeight:700,marginBottom:"4px"}}>{msgPlat==="linkedin"?"🔗 LinkedIn Note":"✉️ Email"} for {selCt.name}</h3>
+                <p style={{fontSize:"12px",color:C.sub,marginBottom:"12px"}}>Style: {MESSAGE_STYLE_MAP[selCt.type]?.label} · {msgPlat==="linkedin"?`${msg.length}/300 chars`:"Full email"}</p>
+                {msgPlat==="linkedin"&&msg.length>300 && <p style={{fontSize:"12px",color:C.err,fontWeight:600,marginBottom:"8px"}}>⚠️ Over 300 character limit. Consider trimming.</p>}
+                <div style={mbox}>{msg}</div>
+                <div style={{marginTop:"14px",display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                  <button style={btn("primary")} onClick={()=>navigator.clipboard.writeText(msg)}>📋 Copy</button>
+                  <button style={btn("secondary")} onClick={()=>window.open(selCt.linkedin,"_blank")}>🔗 LinkedIn</button>
+                  <button style={btn("secondary")} onClick={()=>window.open(`mailto:${selCt.email}?body=${encodeURIComponent(msg)}`,"_blank")}>✉️ Email</button>
+                  <button style={btn()} onClick={()=>addTrack(selCt)}>✓ Track</button>
+                  {msgPlat==="linkedin" && <button style={btn("amber")} onClick={()=>runAuto(selCt)}>🔗 Auto-Connect</button>}
+                </div>
+              </div>
+            </div>
+          )}
 
           {autoStep>=0 && (
             <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn 0.2s ease"}}>
