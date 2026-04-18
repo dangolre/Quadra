@@ -1,5 +1,25 @@
 # Getting Started with Create React App
 
+## Secure AI Backend Setup
+
+This project now includes a backend API for secure AI calls.
+
+1. Create a `.env` file in `careercompass/` using `.env.example`.
+2. Set `CLAUDE_API_KEY` for backend AI requests.
+3. Optionally set `REACT_APP_API_BASE_URL` (default is `http://localhost:4000`).
+
+Run backend API:
+
+```bash
+npm run server
+```
+
+Run frontend:
+
+```bash
+npm start
+```
+
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
 
 ## Available Scripts
