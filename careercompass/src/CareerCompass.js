@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from "react";
+import BuildProfile from "./BuildProfile";
+import LinkedInPipeline from "./LinkedInPipeline";
 
 // ═══════════════════════════════════════════════════
 // CONFIGURATION & CONSTANTS
@@ -138,6 +140,13 @@ export default function CareerCompass() {
   const [companySearchBusy, setCompanySearchBusy] = useState(false);
   const [companySearchError, setCompanySearchError] = useState("");
   const [peopleFilt, setPeopleFilt] = useState({ name: "", role: "", type: "", minConfidence: 0 });
+  const [peopleSort, setPeopleSort] = useState("confidence");
+  const [lastCompanySearch, setLastCompanySearch] = useState("");
+  const [assistantInstruction, setAssistantInstruction] = useState("");
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantError, setAssistantError] = useState("");
+  const [assistantResult, setAssistantResult] = useState(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const chatEnd = useRef(null);
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
@@ -182,10 +191,14 @@ export default function CareerCompass() {
 
   const syncProfileToAutomation = async (nextProfile) => {
     try {
+      const safeProfile = {
+        ...nextProfile,
+        name: nextProfile?.name === "Demo User" ? "" : nextProfile?.name,
+      };
       const response = await fetch(`${apiBase}/profile`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile: nextProfile, resumeText: resume }),
+        body: JSON.stringify({ profile: safeProfile, resumeText: resume }),
       });
       if (!response.ok) {
         throw new Error("Profile sync failed.");
@@ -314,18 +327,26 @@ export default function CareerCompass() {
     }
   };
 
-  const searchCompanyPeople = async () => {
-    if (!coSearch.trim()) return;
+  const searchCompanyPeople = async (queryOverride) => {
+    const nextQuery =
+      typeof queryOverride === "string"
+        ? queryOverride
+        : queryOverride && typeof queryOverride === "object" && "target" in queryOverride
+          ? coSearch
+          : coSearch;
+    const query = String(nextQuery || "").trim();
+    if (!query) return;
     setCompanySearchBusy(true);
     setCompanySearchError("");
     try {
-      const response = await fetch(`${apiBase}/hunter/company-search?q=${encodeURIComponent(coSearch.trim())}`);
+      const response = await fetch(`${apiBase}/hunter/company-search?q=${encodeURIComponent(query)}`);
       if ((response.headers.get("content-type") || "").includes("text/html")) {
         throw new Error("The backend returned HTML instead of JSON. Make sure `npm run server` is running on port 3001.");
       }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Hunter search failed.");
       setCompanyPeople(data.people || []);
+      setLastCompanySearch(data.domain || query);
     } catch (error) {
       setCompanyPeople([]);
       setCompanySearchError(error.message || "Hunter search failed.");
@@ -387,8 +408,103 @@ export default function CareerCompass() {
     if (!resume.trim()) return; setBusy(true);
     const r = await ai("Extract career profile as JSON: name, title, skills[], experience[{role,company,duration}], education[{school,degree,year}], interests[], location. No em dashes. JSON only.", `Extract profile:\n${resume}`);
     try { setProfile(JSON.parse(r.replace(/```json\n?|```\n?/g, "").trim())); setPg("dashboard"); }
-    catch { setProfile({ name: "Demo User", title: "Aspiring Data Engineer", skills: ["Python","SQL","Data Pipelines","AWS","Spark"], experience: [{ role: "Data Analyst Intern", company: "Tech Corp", duration: "6 months" }], education: [{ school: "University of Louisiana Monroe", degree: "BS Computer Science", year: "2025" }], interests: ["Data Engineering","Cloud Computing"], location: "Monroe, LA" }); setPg("dashboard"); }
+    catch { setProfile({ name: "", title: "Aspiring Data Engineer", skills: ["Python","SQL","Data Pipelines","AWS","Spark"], experience: [{ role: "Data Analyst Intern", company: "Tech Corp", duration: "6 months" }], education: [{ school: "University of Louisiana Monroe", degree: "BS Computer Science", year: "2025" }], interests: ["Data Engineering","Cloud Computing"], location: "Monroe, LA" }); setPg("dashboard"); }
     setBusy(false);
+  };
+
+  const buildProfileFromForm = async (formData) => {
+    const fallbackProfile = {
+      name: (formData.fullName || "").trim(),
+      title: formData.targetJobTitles || "Aspiring Professional",
+      skills: [],
+      experience: formData.yearsOfExperience ? [{ role: formData.targetJobTitles || "Target Role", company: "Open to opportunities", duration: formData.yearsOfExperience }] : [],
+      education: [],
+      interests: formData.targetCompanies || [],
+      location: formData.openToRelocation ? "Open to relocation" : "Location not specified",
+    };
+
+    const augmentedResume = [
+      formData.resume || "",
+      formData.fullName ? `Full name: ${formData.fullName}` : "",
+      formData.targetJobTitles ? `Target roles: ${formData.targetJobTitles}` : "",
+      formData.yearsOfExperience ? `Years of experience: ${formData.yearsOfExperience}` : "",
+      formData.employmentTypes?.length ? `Employment types: ${formData.employmentTypes.join(", ")}` : "",
+      formData.openToRelocation ? "Open to relocation: Yes" : "",
+      formData.targetCompanies?.length ? `Target companies: ${formData.targetCompanies.join(", ")}` : "",
+      formData.linkedInUrl ? `LinkedIn: ${formData.linkedInUrl}` : "",
+      formData.portfolioUrl ? `Portfolio: ${formData.portfolioUrl}` : "",
+      formData.githubUrl ? `GitHub: ${formData.githubUrl}` : "",
+      formData.otherLink ? `Other link: ${formData.otherLink}` : "",
+      formData.resumeFileName ? `Uploaded resume file: ${formData.resumeFileName}` : "",
+    ].filter(Boolean).join("\n");
+
+    setResume(augmentedResume);
+    setBusy(true);
+    try {
+      if (formData.resume?.trim()) {
+        const r = await ai("Extract career profile as JSON: name, title, skills[], experience[{role,company,duration}], education[{school,degree,year}], interests[], location. No em dashes. JSON only.", `Extract profile from this candidate information:\n${augmentedResume}`);
+        const parsed = JSON.parse(r.replace(/```json\n?|```\n?/g, "").trim());
+        setProfile({
+          ...fallbackProfile,
+          ...parsed,
+          name: parsed.name && parsed.name !== "Demo User" ? parsed.name : fallbackProfile.name,
+          title: parsed.title || fallbackProfile.title,
+          interests: [...new Set([...(parsed.interests || []), ...(formData.targetCompanies || [])])],
+        });
+      } else {
+        setProfile(fallbackProfile);
+      }
+      setPg("dashboard");
+    } catch {
+      setProfile(fallbackProfile);
+      setPg("dashboard");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runClaudeAssistant = async ({ sendNow = false } = {}) => {
+    if (!selCt) {
+      setAssistantError("Select a contact first.");
+      return;
+    }
+    if (!assistantInstruction.trim()) {
+      setAssistantError("Enter an instruction for the assistant.");
+      return;
+    }
+    setAssistantBusy(true);
+    setAssistantError("");
+    try {
+      const response = await fetch(`${apiBase}/assistant/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction: assistantInstruction,
+          contact: selCt,
+          email: foundEmail?.email || selCt.email || "",
+          currentDraft: msg ? { platform: msgPlat, body: msg } : null,
+          sendNow,
+        }),
+      });
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("text/html")) {
+        throw new Error("Assistant backend route is not available yet. Restart `npm run dev:all` so the server picks up /api/assistant/action.");
+      }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Assistant action failed.");
+      setAssistantResult(data.result || null);
+      if (data.result?.body && data.result?.action?.includes("email")) {
+        setMsg(data.result.body);
+        setMsgPlat("email");
+      }
+      if (data.result?.sent) {
+        await refreshAutomationStatus();
+      }
+    } catch (error) {
+      setAssistantError(error.message || "Assistant action failed.");
+    } finally {
+      setAssistantBusy(false);
+    }
   };
 
   const genMsg = async (contact, platform) => {
@@ -521,13 +637,21 @@ export default function CareerCompass() {
   const filtTrack = tracker.filter(c => stFilt==="All"?true:stFilt==="Needs Follow-up"?c.status==="Sent"||c.status==="No Response":c.status===stFilt);
   const filtNotif = NOTIFICATIONS.filter(n => nFilt==="all"?true:n.type===nFilt);
   const allCts = Object.values(DEMO_CONTACTS).flat();
-  const searchCts = coSearch ? allCts.filter(c => c.company.toLowerCase().includes(coSearch.toLowerCase())||c.name.toLowerCase().includes(coSearch.toLowerCase())||c.role.toLowerCase().includes(coSearch.toLowerCase())) : [];
+  const searchQuickPicks = [...new Set([
+    ...(automationStatus?.applications?.map((item) => item.company).filter(Boolean) || []),
+    ...(profile?.interests || []),
+    ...(profile?.education?.map((item) => item.school).filter(Boolean) || []),
+  ])].slice(0, 8);
   const filtCompanyPeople = companyPeople.filter((person) => {
     if (peopleFilt.name && !person.name.toLowerCase().includes(peopleFilt.name.toLowerCase())) return false;
     if (peopleFilt.role && !person.role.toLowerCase().includes(peopleFilt.role.toLowerCase())) return false;
     if (peopleFilt.type && person.type !== peopleFilt.type) return false;
     if ((person.confidence || 0) < Number(peopleFilt.minConfidence || 0)) return false;
     return true;
+  }).sort((a, b) => {
+    if (peopleSort === "name") return a.name.localeCompare(b.name);
+    if (peopleSort === "role") return (a.role || "").localeCompare(b.role || "");
+    return (b.confidence || 0) - (a.confidence || 0);
   });
 
   // ═══ STYLES ═══
@@ -572,6 +696,7 @@ export default function CareerCompass() {
             <button style={tab(pg==="dashboard")} onClick={()=>setPg("dashboard")}>Dashboard</button>
             <button style={tab(pg==="search")} onClick={()=>setPg("search")}>Search</button>
             <button style={tab(pg==="tracker")} onClick={()=>setPg("tracker")}>Tracker{tracker.length>0&&` (${tracker.length})`}</button>
+            <button style={tab(pg==="pipeline")} onClick={()=>setPg("pipeline")}>LinkedIn Pipeline</button>
             <button style={tab(pg==="replies")} onClick={()=>setPg("replies")}>Replies ({SIMULATED_REPLIES.length})</button>
             <button style={{ ...tab(pg==="todo"),position:"relative" }} onClick={()=>setPg("todo")}>
               To-Do<span style={{ position:"absolute",top:2,right:2,width:7,height:7,borderRadius:"50%",background:C.err }} />
@@ -680,16 +805,25 @@ export default function CareerCompass() {
 
       {/* ONBOARDING */}
       {pg==="onboard" && (
-        <div style={{ maxWidth:"640px",margin:"0 auto",padding:"40px 24px",animation:"fadeIn 0.4s ease" }}>
-          <div style={{ textAlign:"center",marginBottom:"28px" }}><h1 style={{fontSize:"28px",fontWeight:800}}>Let's build your profile</h1><p style={{fontSize:"15px",color:C.sub,marginTop:"8px"}}>Paste your resume or describe your background.</p></div>
-          <div style={card}>
-            <textarea style={{...inp,minHeight:"140px",resize:"vertical"}} placeholder="Paste your resume or describe your background..." value={resume} onChange={e=>setResume(e.target.value)} />
-            <div style={{marginTop:"14px",display:"flex",gap:"10px"}}>
-              <button style={btn("primary")} onClick={extractProfile} disabled={busy||!resume.trim()}>{busy?"Analyzing...":"Extract Profile →"}</button>
-              <button style={btn("ghost")} onClick={()=>setResume("I'm a recent Computer Science graduate from the University of Louisiana Monroe (ULM), class of 2025. I have experience in Python, SQL, Apache Spark, and AWS. I completed a 6-month internship at a tech startup as a Data Analyst where I built dashboards and data pipelines. I'm passionate about data engineering and cloud computing. Looking for entry-level data engineering roles at companies like Google, Amazon, or Meta. Located in Monroe, Louisiana.")}>Load Demo</button>
-            </div>
-          </div>
-        </div>
+        <BuildProfile
+          isSubmitting={busy}
+          initialData={{
+            resume,
+            fullName: profile?.name || "",
+            targetJobTitles: profile?.title || "",
+            targetCompanies: profile?.interests || [],
+            githubUrl: "",
+            linkedInUrl: "",
+            portfolioUrl: "",
+            otherLink: "",
+            employmentTypes: [],
+            openToRelocation: false,
+            yearsOfExperience: "Student / No experience",
+            resumeFile: null,
+            resumeFileName: "",
+          }}
+          onSubmit={buildProfileFromForm}
+        />
       )}
 
       {/* DASHBOARD */}
@@ -906,6 +1040,35 @@ export default function CareerCompass() {
                           </div>
                         </div>
                       )}
+
+                      <div style={{marginTop:"14px",padding:"14px",background:"#fafaf9",border:`1px solid ${C.border}`,borderRadius:"12px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"10px",flexWrap:"wrap",marginBottom:"8px"}}>
+                          <div>
+                            <h4 style={{fontSize:"14px",fontWeight:800,margin:0}}>Claude Networking Assistant</h4>
+                            <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>Tell the assistant what to do with this contact, like draft an email or send it from Gmail.</p>
+                          </div>
+                          {foundEmail?.email && <span style={{fontSize:"11px",fontWeight:700,color:C.primaryDark,background:C.primaryLight,padding:"6px 10px",borderRadius:"999px"}}>{foundEmail.email}</span>}
+                        </div>
+                        <textarea
+                          style={{...inp,minHeight:"84px",resize:"vertical"}}
+                          placeholder='Example: Write a concise email asking for a quick internal referral. Or: Send the email now.'
+                          value={assistantInstruction}
+                          onChange={e=>setAssistantInstruction(e.target.value)}
+                        />
+                        <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginTop:"10px"}}>
+                          <button style={btn("secondary")} onClick={()=>runClaudeAssistant()} disabled={assistantBusy}>{assistantBusy ? "Thinking..." : "Ask Assistant"}</button>
+                          <button style={btn("amber")} onClick={()=>runClaudeAssistant({ sendNow: true })} disabled={assistantBusy || !automationStatus?.gmailConnected}>{assistantBusy ? "Sending..." : "Ask + Send Email"}</button>
+                        </div>
+                        {assistantError && <div style={{marginTop:"10px",padding:"10px 12px",background:C.errLight,border:`1px solid ${C.err}33`,borderRadius:"10px",fontSize:"12px",color:C.err}}>{assistantError}</div>}
+                        {assistantResult && (
+                          <div style={{marginTop:"10px",padding:"12px",background:"#fff",border:`1px solid ${C.border}`,borderRadius:"10px"}}>
+                            <p style={{fontSize:"12px",fontWeight:700,marginBottom:"6px"}}>Assistant Reply</p>
+                            <p style={{fontSize:"12px",color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{assistantResult.reply}</p>
+                            {assistantResult.subject && <p style={{fontSize:"12px",color:C.sub,marginTop:"8px"}}><strong>Subject:</strong> {assistantResult.subject}</p>}
+                            {assistantResult.reason && <p style={{fontSize:"12px",color:C.sub,marginTop:"6px"}}><strong>Reason:</strong> {assistantResult.reason}</p>}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1005,7 +1168,7 @@ export default function CareerCompass() {
       {pg==="search" && (
         <div style={wrap}>
           <h1 style={{fontSize:"24px",fontWeight:800,marginBottom:"6px"}}>Search</h1>
-          <p style={{fontSize:"14px",color:C.sub,marginBottom:"20px"}}>Find jobs and discover employees at target companies</p>
+          <p style={{fontSize:"14px",color:C.sub,marginBottom:"20px"}}>Find jobs and search a company to discover real people and emails from that company</p>
           <div style={{display:"flex",gap:"6px",marginBottom:"20px"}}><button style={tab(sTab==="jobs")} onClick={()=>setSTab("jobs")}>Job Postings</button><button style={tab(sTab==="people")} onClick={()=>setSTab("people")}>Employee / Company</button></div>
 
           {sTab==="jobs" && <>
@@ -1023,28 +1186,67 @@ export default function CareerCompass() {
             ))}
           </>}
           {sTab==="people" && <>
-            <div style={{...card,padding:"16px",display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap"}}><input style={{...inp,flex:"1 1 280px"}} placeholder="Search company or domain..." value={coSearch} onChange={e=>setCoSearch(e.target.value)} /><button style={btn("primary")} onClick={searchCompanyPeople} disabled={companySearchBusy || !coSearch.trim()}>{companySearchBusy ? "Searching..." : "Search Hunter"}</button></div>
+            <div style={{...card,padding:"16px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"12px",flexWrap:"wrap"}}>
+                <div>
+                  <h3 style={{fontSize:"16px",fontWeight:800,margin:0}}>Company Search</h3>
+                  <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>Type a company name like Google or a domain like google.com to find people and emails from that company.</p>
+                </div>
+                {lastCompanySearch && <span style={{fontSize:"11px",color:C.primaryDark,background:C.primaryLight,padding:"6px 10px",borderRadius:"999px",fontWeight:700}}>Last domain: {lastCompanySearch}</span>}
+              </div>
+              {!!searchQuickPicks.length && (
+                <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginTop:"14px"}}>
+                  {searchQuickPicks.map((item) => (
+                    <button key={item} style={{...btn("ghost"),padding:"6px 12px",fontSize:"12px",border:`1px solid ${C.border}`,background:"#fff"}} onClick={()=>{setCoSearch(item); searchCompanyPeople(item);}}>
+                      {item}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div style={{display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap",marginTop:"14px"}}>
+                <input
+                  style={{...inp,flex:"1 1 280px"}}
+                  placeholder="Search company name or domain, e.g. Google or google.com"
+                  value={coSearch}
+                  onChange={e=>setCoSearch(e.target.value)}
+                  onKeyDown={e=>{ if (e.key==="Enter") searchCompanyPeople(); }}
+                />
+                <button style={btn("primary")} onClick={searchCompanyPeople} disabled={companySearchBusy || !coSearch.trim()}>{companySearchBusy ? "Searching..." : "Search Hunter"}</button>
+                <button style={btn("ghost")} onClick={()=>{setCoSearch(""); setCompanyPeople([]); setLastCompanySearch(""); setCompanySearchError("");}} disabled={companySearchBusy}>Clear</button>
+              </div>
+            </div>
             {companySearchError && <div style={{...card,padding:"14px",background:C.errLight,border:`1px solid ${C.err}33`,color:C.err}}>{companySearchError}</div>}
             {companyPeople.length>0 && <div style={{...card,padding:"16px",display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap"}}>
               <input style={{...inp,width:"200px"}} placeholder="Filter by name..." value={peopleFilt.name} onChange={e=>setPeopleFilt(p=>({...p,name:e.target.value}))} />
               <input style={{...inp,width:"220px"}} placeholder="Filter by role..." value={peopleFilt.role} onChange={e=>setPeopleFilt(p=>({...p,role:e.target.value}))} />
               <select style={sel} value={peopleFilt.type} onChange={e=>setPeopleFilt(p=>({...p,type:e.target.value}))}><option value="">All types</option><option>Recruiter</option><option>Hiring Manager</option><option>Industry Peer</option></select>
               <select style={sel} value={peopleFilt.minConfidence} onChange={e=>setPeopleFilt(p=>({...p,minConfidence:Number(e.target.value)}))}><option value={0}>Any confidence</option><option value={70}>70%+</option><option value={80}>80%+</option><option value={90}>90%+</option></select>
+              <select style={sel} value={peopleSort} onChange={e=>setPeopleSort(e.target.value)}><option value="confidence">Sort by confidence</option><option value="name">Sort by name</option><option value="role">Sort by role</option></select>
+              <button style={{...btn("ghost"),padding:"8px 12px",border:`1px solid ${C.border}`}} onClick={()=>setPeopleFilt({ name: "", role: "", type: "", minConfidence: 0 })}>Reset filters</button>
               <span style={{fontSize:"12px",color:C.muted,marginLeft:"auto"}}>{filtCompanyPeople.length} people</span>
             </div>}
             {companyPeople.length>0 && filtCompanyPeople.length===0 && <div style={{...card,padding:"18px",textAlign:"center",color:C.muted}}>No people match the current filters.</div>}
             {filtCompanyPeople.length>0 ? filtCompanyPeople.map(ct=>(
               <div key={ct.id} style={{...card,padding:"16px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:"12px"}}>
-                <div style={{display:"flex",gap:"10px",alignItems:"center"}}><div style={av()}>{ct.name[0]}</div><div><h3 style={{fontSize:"14px",fontWeight:700,margin:0}}>{ct.name}</h3><p style={{fontSize:"12px",color:C.sub}}>{ct.role} at {ct.company}</p><p style={{fontSize:"12px",color:C.text,marginTop:"4px"}}>{ct.email}</p><p style={{fontSize:"11px",color:C.muted,marginTop:"2px"}}>Hunter confidence: {ct.confidence}%</p></div></div>
+                <div style={{display:"flex",gap:"10px",alignItems:"center"}}><div style={av()}>{ct.name[0]}</div><div><h3 style={{fontSize:"14px",fontWeight:700,margin:0}}>{ct.name}</h3><p style={{fontSize:"12px",color:C.sub}}>{ct.role} at {ct.company}</p><p style={{fontSize:"12px",color:C.text,marginTop:"4px"}}>{ct.email}</p><div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginTop:"6px"}}><span style={{fontSize:"11px",color:C.muted}}>Hunter confidence: {ct.confidence}%</span>{ct.department && <span style={{fontSize:"11px",color:C.muted}}>Dept: {ct.department}</span>}{ct.seniority && <span style={{fontSize:"11px",color:C.muted}}>Seniority: {ct.seniority}</span>}{ct.domain && <span style={{fontSize:"11px",color:C.muted}}>Domain: {ct.domain}</span>}</div></div></div>
                 <div style={{display:"flex",gap:"6px",alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
                   <span style={badge(ct.type)}>{ct.type}</span>
+                  {ct.verification && <span style={{fontSize:"10px",fontWeight:700,padding:"4px 8px",borderRadius:"999px",background:"#f5f5f4",color:C.sub}}>{ct.verification}</span>}
                   <button style={{...btn("secondary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>navigator.clipboard?.writeText(ct.email)}>Copy Email</button>
-                  <button style={{...btn("primary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>{setSelCo(ct.company);setSelCt(ct);setPg("dashboard");}}>Use Contact</button>
+                  <button style={{...btn("primary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>{setSelCo(ct.company);setSelCt(ct);setFoundEmail({ email: ct.email, source: ct.source || "Hunter.io", confidence: ct.confidence || 0, verified: /valid|accept_all|verified/i.test(ct.verification || "") }); setAssistantOpen(true); setAssistantResult(null); setAssistantError("");}}>Use Contact</button>
                 </div>
               </div>
-            )) : !companyPeople.length && <p style={{fontSize:"14px",color:C.muted,textAlign:"center",padding:"40px"}}>{coSearch?"Search Hunter to find people at this company.":"Type a company or domain and search Hunter."}</p>}
+            )) : !companyPeople.length && <p style={{fontSize:"14px",color:C.muted,textAlign:"center",padding:"40px"}}>{coSearch?"Click Search Hunter to find people and emails at this company.":"Type a company name or domain to find people and emails from that company."}</p>}
           </>}
         </div>
+      )}
+
+      {/* LINKEDIN PIPELINE */}
+      {pg==="pipeline" && (
+        <LinkedInPipeline
+          profile={profile}
+          applications={automationStatus?.applications || []}
+        />
       )}
 
       {/* TRACKER */}
@@ -1173,6 +1375,76 @@ export default function CareerCompass() {
         <div style={{maxWidth:"700px",margin:"0 auto",padding:"28px 24px",animation:"fadeIn 0.3s ease"}}>
           <button style={btn("ghost")} onClick={()=>setPg("sim")}>← Back</button>
           <div style={{marginTop:"16px"}}><h1 style={{fontSize:"22px",fontWeight:800}}>Post-Chat Follow-ups</h1><p style={{fontSize:"14px",color:C.sub,marginTop:"4px"}}>For {fuData?.reply?.from} at {fuData?.reply?.company}</p><div style={{...card,marginTop:"16px"}}><div style={mbox}>{fuData?.followUp}</div><div style={{marginTop:"14px",display:"flex",gap:"8px"}}><button style={btn("primary")} onClick={()=>navigator.clipboard.writeText(fuData?.followUp||"")}>📋 Copy All</button><button style={btn("secondary")} onClick={()=>{if(simCt)addTrack(simCt,"Coffee Chat Scheduled");setPg("tracker");}}>✓ Add to Tracker</button></div></div></div>
+        </div>
+      )}
+
+      <button
+        style={{
+          position:"fixed",
+          right:"22px",
+          bottom:"22px",
+          width:"58px",
+          height:"58px",
+          borderRadius:"50%",
+          border:`2px solid ${C.accent}55`,
+          background:"linear-gradient(135deg, #fff7ed 0%, #fef3c7 100%)",
+          boxShadow:"0 12px 28px rgba(28,25,23,0.18)",
+          cursor:"pointer",
+          display:"flex",
+          alignItems:"center",
+          justifyContent:"center",
+          fontSize:"24px",
+          zIndex:300,
+        }}
+        title="Open Claude Networking Assistant"
+        onClick={()=>setAssistantOpen(v=>!v)}
+      >
+        🤖
+      </button>
+
+      {assistantOpen && (
+        <div style={{position:"fixed",right:"22px",bottom:"92px",width:"min(420px, calc(100vw - 24px))",maxHeight:"70vh",overflowY:"auto",background:"#fff",border:`1px solid ${C.border}`,borderRadius:"18px",boxShadow:"0 20px 50px rgba(28,25,23,0.22)",zIndex:300,padding:"16px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"10px",marginBottom:"10px"}}>
+            <div>
+              <h3 style={{fontSize:"16px",fontWeight:800,margin:0}}>Claude Networking Assistant</h3>
+              <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>Available across the app. Select a contact, then tell Claude to draft or send an email.</p>
+            </div>
+            <button style={{...btn("ghost"),padding:"6px 10px",border:`1px solid ${C.border}`,fontSize:"12px"}} onClick={()=>setAssistantOpen(false)}>Close</button>
+          </div>
+
+          <div style={{padding:"12px",background:"#fafaf9",border:`1px solid ${C.border}`,borderRadius:"12px",marginBottom:"10px"}}>
+            {selCt ? (
+              <>
+                <p style={{fontSize:"12px",fontWeight:800,margin:0}}>{selCt.name}</p>
+                <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>{selCt.role} at {selCt.company}</p>
+                <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>Email: {foundEmail?.email || selCt.email || "No email selected yet"}</p>
+              </>
+            ) : (
+              <p style={{fontSize:"12px",color:C.sub,margin:0}}>No contact selected yet. Pick a person from Search or Dashboard first, then use the assistant here.</p>
+            )}
+          </div>
+
+          <textarea
+            style={{...inp,minHeight:"96px",resize:"vertical"}}
+            placeholder='Example: Write a concise outreach email to this person. Or: Send the email now.'
+            value={assistantInstruction}
+            onChange={e=>setAssistantInstruction(e.target.value)}
+          />
+
+          <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginTop:"10px"}}>
+            <button style={btn("secondary")} onClick={()=>runClaudeAssistant()} disabled={assistantBusy}>{assistantBusy ? "Thinking..." : "Ask Assistant"}</button>
+            <button style={btn("amber")} onClick={()=>runClaudeAssistant({ sendNow: true })} disabled={assistantBusy || !automationStatus?.gmailConnected}>{assistantBusy ? "Sending..." : "Ask + Send Email"}</button>
+          </div>
+
+          {assistantError && <div style={{marginTop:"10px",padding:"10px 12px",background:C.errLight,border:`1px solid ${C.err}33`,borderRadius:"10px",fontSize:"12px",color:C.err}}>{assistantError}</div>}
+          {assistantResult && (
+            <div style={{marginTop:"10px",padding:"12px",background:"#fff",border:`1px solid ${C.border}`,borderRadius:"10px"}}>
+              <p style={{fontSize:"12px",fontWeight:700,marginBottom:"6px"}}>Assistant Reply</p>
+              <p style={{fontSize:"12px",color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{assistantResult.reply}</p>
+              {assistantResult.subject && <p style={{fontSize:"12px",color:C.sub,marginTop:"8px"}}><strong>Subject:</strong> {assistantResult.subject}</p>}
+              {assistantResult.reason && <p style={{fontSize:"12px",color:C.sub,marginTop:"6px"}}><strong>Reason:</strong> {assistantResult.reason}</p>}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -630,6 +630,97 @@ async function generateOutreachDraft(profile, application, contact) {
   };
 }
 
+async function runAssistantAction({ instruction, profile, contact, email, currentDraft, sendNow }) {
+  if (!instruction?.trim()) {
+    throw new Error("Assistant instruction is required.");
+  }
+  if (!profile?.name) {
+    throw new Error("Profile not synced yet.");
+  }
+  if (!contact?.name) {
+    throw new Error("A contact must be selected first.");
+  }
+
+  const targetEmail = (email || contact.email || "").trim();
+  const system = [
+    "You are CareerCompass Assistant, an AI assistant for networking outreach.",
+    "You help a job seeker decide what to do next with a selected contact.",
+    "Return strict JSON only.",
+    'Schema: {"reply":"short assistant response","action":"draft_email|send_email|draft_linkedin|none","subject":"", "body":"", "to":"", "reason":"short reason"}',
+    "If the user asks to send an email, produce a polished subject and body.",
+    "Do not use placeholders.",
+    "Use the sender's actual profile details.",
+    "Be concise, practical, and specific.",
+  ].join("\n");
+
+  const user = [
+    `Instruction: ${instruction}`,
+    `Sender profile: ${JSON.stringify(profile)}`,
+    `Selected contact: ${JSON.stringify(contact)}`,
+    `Resolved email: ${targetEmail || "None"}`,
+    `Current draft: ${currentDraft ? JSON.stringify(currentDraft) : "None"}`,
+    `User explicitly approved sending now: ${sendNow ? "yes" : "no"}`,
+  ].join("\n");
+
+  const raw = await callClaude(system, user, 900);
+  const parsed = parseJsonResponse(raw);
+
+  const result = {
+    reply: parsed.reply || "I reviewed the contact and prepared the next step.",
+    action: parsed.action || "none",
+    subject: parsed.subject || "",
+    body: parsed.body || "",
+    to: parsed.to || targetEmail,
+    reason: parsed.reason || "",
+    sent: false,
+    gmailMessageId: null,
+  };
+
+  if (result.action === "send_email") {
+    if (!sendNow) {
+      result.reply = `${result.reply} Sending is blocked until you confirm.`;
+      result.action = "draft_email";
+      return result;
+    }
+    if (!result.to) {
+      throw new Error("No recipient email is available for this contact.");
+    }
+    const auth = await getAuthorizedClient();
+    if (!auth) {
+      throw new Error("Gmail is not connected yet.");
+    }
+    const state = await getState();
+    const sent = await sendGmailMessage(auth, {
+      to: result.to,
+      subject: result.subject,
+      body: result.body,
+      attachment: buildResumeAttachment(profile, state.resumeText),
+    });
+    await updateState((current) => ({
+      ...current,
+      outreachLog: [
+        {
+          company: contact.company || "",
+          appliedRole: "",
+          to: result.to,
+          contactName: contact.name,
+          role: contact.role || "",
+          bucket: "assistant",
+          subject: result.subject,
+          gmailMessageId: sent.id,
+          sentAt: nowIso(),
+        },
+        ...(current.outreachLog || []),
+      ].slice(0, 500),
+    }));
+    result.sent = true;
+    result.gmailMessageId = sent.id;
+    result.reply = `Email sent to ${result.to}.`;
+  }
+
+  return result;
+}
+
 function buildResumeAttachment(profile, resumeText) {
   const rawResume = (resumeText || "").trim();
   if (rawResume) {
@@ -887,6 +978,23 @@ app.post("/api/profile", async (req, res) => {
   res.json({ ok: true, profile: state.profile });
 });
 
+app.post("/api/assistant/action", async (req, res) => {
+  try {
+    const state = await getState();
+    const result = await runAssistantAction({
+      instruction: req.body?.instruction || "",
+      profile: state.profile,
+      contact: req.body?.contact || null,
+      email: req.body?.email || "",
+      currentDraft: req.body?.currentDraft || null,
+      sendNow: Boolean(req.body?.sendNow),
+    });
+    res.json({ ok: true, result });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Assistant action failed." });
+  }
+});
+
 app.get("/api/google/oauth/start", (req, res) => {
   if (!isConfigured()) {
     return res.status(500).send("Google OAuth is not configured on the server.");
@@ -985,6 +1093,10 @@ app.get("/api/hunter/company-search", async (req, res) => {
       source: "Hunter.io",
       confidence: entry.confidence || 0,
       linkedin: entry.linkedin,
+      department: entry.department || "",
+      seniority: entry.seniority || "",
+      domain,
+      verification: entry.verification?.status || "",
       type:
         /(recruit|talent|sourc|staffing|hr\b)/i.test(entry.position || "") ? "Recruiter" :
         /(manager|director|head|lead|vp)/i.test(entry.position || "") ? "Hiring Manager" :
