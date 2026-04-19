@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import CoffeeChatSimulator from "./CoffeeChatSimulator";
 
 const GEMINI_API_KEY = process.env.REACT_APP_GEMINI_API_KEY;
 
@@ -110,7 +111,13 @@ async function geminiCall(sys, usr) {
   }
 }
 
-export default function LinkedInPipeline({ profile, applications = [] }) {
+export default function LinkedInPipeline({
+  profile,
+  applications = [],
+  demoContacts = {},
+  targetCompanies = [],
+  onOpenLinkedInSimulation,
+}) {
   const [subTab, setSubTab] = useState("pipeline");
   const [stage, setStage] = useState("idle");
   const [currentStep, setCurrentStep] = useState(-1);
@@ -123,8 +130,23 @@ export default function LinkedInPipeline({ profile, applications = [] }) {
 
   const [followUp, setFollowUp] = useState(() => readStored("cc_pipeline_followup", []));
   const [followUpBusyId, setFollowUpBusyId] = useState(null);
+  const [simulatorContact, setSimulatorContact] = useState(null);
+  const [simulatorLaunchToken, setSimulatorLaunchToken] = useState(0);
+  const [selectedTargetCompany, setSelectedTargetCompany] = useState("");
 
   useEffect(() => { writeStored("cc_pipeline_followup", followUp); }, [followUp]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem("cc_pipeline_nav_request");
+      if (!raw) return;
+      const request = JSON.parse(raw);
+      if (request?.subTab) {
+        setSubTab(request.subTab);
+      }
+      window.localStorage.removeItem("cc_pipeline_nav_request");
+    } catch {}
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -133,6 +155,30 @@ export default function LinkedInPipeline({ profile, applications = [] }) {
   }, [toast]);
 
   const resolvedSchool = profile?.education?.[0]?.school || "";
+  const targetCompanyList = useMemo(() => {
+    const fromTargets = Array.isArray(targetCompanies) ? targetCompanies : [];
+    const fromApplications = (applications || []).map((item) => item?.company).filter(Boolean);
+    const fromDemo = Object.keys(demoContacts || {});
+    return [...new Set([...fromTargets, ...fromApplications, ...fromDemo])]
+      .filter(Boolean)
+      .filter((company) => (demoContacts?.[company] || []).length > 0);
+  }, [applications, demoContacts, targetCompanies]);
+
+  const selectedTargetContacts = useMemo(
+    () => (selectedTargetCompany ? (demoContacts?.[selectedTargetCompany] || []) : []),
+    [demoContacts, selectedTargetCompany]
+  );
+
+  useEffect(() => {
+    if (!targetCompanyList.length) {
+      setSelectedTargetCompany("");
+      return;
+    }
+    if (!selectedTargetCompany || !targetCompanyList.includes(selectedTargetCompany)) {
+      setSelectedTargetCompany(targetCompanyList[0]);
+    }
+  }, [selectedTargetCompany, targetCompanyList]);
+
   const senderSummary = useMemo(() => {
     if (!profile) return "A motivated professional exploring new roles.";
     const parts = [
@@ -196,6 +242,16 @@ Write one LinkedIn connection note under 300 characters.`;
       .replace(/\[Company\]/gi, contact.company || "");
     if (out.length > 300) out = out.slice(0, 297).trimEnd() + "...";
     return out;
+  };
+
+  const simulateLinkedInConnect = async (contact) => {
+    if (typeof onOpenLinkedInSimulation === "function") {
+      onOpenLinkedInSimulation(contact, "");
+      const draftedNote = await generateMessage(contact);
+      onOpenLinkedInSimulation(contact, draftedNote || "");
+      return;
+    }
+    setToast("LinkedIn simulator is not connected yet.");
   };
 
   const runPipeline = async () => {
@@ -377,6 +433,12 @@ Return ONLY the JSON object. No prose, no backticks.`;
 
   const removeFollowUp = (id) => setFollowUp((prev) => prev.filter((f) => f.id !== id));
 
+  const openSimulatorFor = (contact = null) => {
+    setSimulatorContact(contact || null);
+    setSimulatorLaunchToken((prev) => prev + 1);
+    setSubTab("simulator");
+  };
+
   const renderStepTile = (i) => {
     const step = PIPELINE_STEPS[i];
     const isDone = i < currentStep;
@@ -402,6 +464,121 @@ Return ONLY the JSON object. No prose, no backticks.`;
 
   const pipelineTab = (
     <>
+      {!!targetCompanyList.length && (
+        <div style={{ ...card, border: `1px solid ${C.accent}33`, background: "#fffcf2" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
+            <div>
+              <h2 style={{ fontSize: "18px", fontWeight: 800, margin: 0 }}>Target Companies & Contacts</h2>
+              <p style={{ fontSize: "13px", color: C.sub, lineHeight: 1.6, maxWidth: "700px", marginTop: "6px" }}>
+                Keep your target-company research and outreach in one place. Pick a company to review warm contacts before you run the outreach pipeline.
+              </p>
+            </div>
+            <span style={{ fontSize: "12px", color: C.sub }}>{targetCompanyList.length} companies tracked</span>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px", marginTop: "16px" }}>
+            {targetCompanyList.map((company) => {
+              const active = company === selectedTargetCompany;
+              const count = demoContacts?.[company]?.length || 0;
+              return (
+                <button
+                  key={company}
+                  onClick={() => setSelectedTargetCompany(company)}
+                  style={{
+                    textAlign: "left",
+                    background: active ? C.primaryLight : "#fff",
+                    border: `1.5px solid ${active ? C.primary : C.border}`,
+                    borderRadius: "14px",
+                    padding: "14px",
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  <p style={{ fontSize: "15px", fontWeight: 800, color: C.text, margin: 0 }}>{company}</p>
+                  <p style={{ fontSize: "12px", color: active ? C.primaryDark : C.sub, margin: "6px 0 0" }}>
+                    {count} saved contact{count === 1 ? "" : "s"}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          {selectedTargetCompany && (
+            <div style={{ marginTop: "18px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap", marginBottom: "10px" }}>
+                <h3 style={{ fontSize: "15px", fontWeight: 800, margin: 0 }}>Contacts at {selectedTargetCompany}</h3>
+                {!!selectedTargetContacts.length && (
+                  <span style={{ fontSize: "12px", color: C.sub }}>{selectedTargetContacts.length} contacts available</span>
+                )}
+              </div>
+
+              {selectedTargetContacts.length ? (
+                <div style={{ display: "grid", gap: "10px" }}>
+                  {selectedTargetContacts.map((contact) => (
+                    <div key={contact.id} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: "14px", padding: "14px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+                        <div style={{ display: "flex", gap: "10px", alignItems: "center", minWidth: 0 }}>
+                          <div style={av(C.primary)}>{contact.name?.[0] || "?"}</div>
+                          <div style={{ minWidth: 0 }}>
+                            <h4 style={{ fontSize: "14px", fontWeight: 800, margin: 0 }}>{contact.name}</h4>
+                            <p style={{ fontSize: "12px", color: C.sub, margin: "2px 0" }}>{contact.role} • {contact.tenure}</p>
+                            <p style={{ fontSize: "11px", color: C.muted, margin: 0 }}>{contact.school}</p>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
+                          <span style={badge(contact.type)}>{contact.type}</span>
+                          <button
+                            style={{ ...btn("ghost"), fontSize: "12px", padding: "6px 12px", border: `1px solid ${C.border}` }}
+                            onClick={() => openSimulatorFor(contact)}
+                          >
+                            Practice Chat
+                          </button>
+                          <button
+                            style={{
+                              width: 34,
+                              height: 34,
+                              borderRadius: "50%",
+                              border: `1.5px solid ${C.border}`,
+                              background: "#fff",
+                              cursor: "pointer",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              boxShadow: C.shadow,
+                            }}
+                            title="Open LinkedIn connection simulation"
+                            onClick={() => simulateLinkedInConnect(contact)}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="#0077B5" aria-hidden="true">
+                              <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" />
+                            </svg>
+                          </button>
+                          <a
+                            href={linkedInSearchUrl(contact.name, contact.company)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ ...btn("secondary"), fontSize: "12px", padding: "6px 12px", textDecoration: "none" }}
+                          >
+                            Find on LinkedIn
+                          </a>
+                        </div>
+                      </div>
+                      {contact.bio && <p style={{ fontSize: "12px", color: C.sub, lineHeight: 1.6, margin: "10px 0 0" }}>{contact.bio}</p>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: "14px", padding: "16px" }}>
+                  <p style={{ fontSize: "13px", color: C.sub, margin: 0 }}>
+                    No saved contacts for {selectedTargetCompany} yet. Run the pipeline to generate contact suggestions for this company.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ ...card, border: `1px solid ${C.primary}33` }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", flexWrap: "wrap" }}>
           <div>
@@ -596,6 +773,12 @@ Return ONLY the JSON object. No prose, no backticks.`;
                   <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
                     <span style={badge(item.type)}>{item.type}</span>
                     <button
+                      style={{ ...btn("ghost"), fontSize: "12px", padding: "6px 12px", border: `1px solid ${C.border}` }}
+                      onClick={() => openSimulatorFor(item)}
+                    >
+                      Practice This Chat
+                    </button>
+                    <button
                       style={{ ...btn(isConnected ? "ok" : "secondary"), fontSize: "12px", padding: "6px 14px" }}
                       onClick={() => setConnectionStatus(item.id, isConnected ? "pending" : "connected")}
                     >
@@ -666,6 +849,16 @@ Return ONLY the JSON object. No prose, no backticks.`;
     </>
   );
 
+  const simulatorTab = (
+    <CoffeeChatSimulator
+      profile={profile}
+      contacts={contacts}
+      followUpContacts={followUp}
+      initialContact={simulatorContact}
+      launchToken={simulatorLaunchToken}
+    />
+  );
+
   return (
     <div style={wrap}>
       <h1 style={{ fontSize: "24px", fontWeight: 800, marginBottom: "6px" }}>LinkedIn Pipeline</h1>
@@ -678,9 +871,12 @@ Return ONLY the JSON object. No prose, no backticks.`;
         <button style={tab(subTab === "followup")} onClick={() => setSubTab("followup")}>
           Follow-up Queue{followUp.length > 0 && ` (${followUp.length})`}
         </button>
+        <button style={tab(subTab === "simulator")} onClick={() => openSimulatorFor(simulatorContact)}>
+          Simulator
+        </button>
       </div>
 
-      {subTab === "pipeline" ? pipelineTab : followUpTab}
+      {subTab === "pipeline" ? pipelineTab : subTab === "followup" ? followUpTab : simulatorTab}
 
       {toast && (
         <div style={{

@@ -71,6 +71,26 @@ const SHARED_ATS_DOMAINS = new Set([
   "glassdoor.com",
 ]);
 
+const DEMO_DOMAIN_CONTACTS = {
+  "ulm.edu": [
+    {
+      id: "ulm-demo-kristin-chandler",
+      name: "Kristin Chandler",
+      email: "morris@ulm.edu",
+      role: "Executive Director",
+      company: "University of Louisiana Monroe",
+      source: "CareerCompass demo",
+      confidence: 100,
+      linkedin: "",
+      department: "ULM",
+      seniority: "",
+      domain: "ulm.edu",
+      verification: "demo contact",
+      type: "Industry Peer",
+    },
+  ],
+};
+
 function isSharedAtsDomain(domain) {
   if (!domain) return false;
   const lower = domain.toLowerCase();
@@ -103,6 +123,25 @@ app.use(express.json({ limit: "1mb" }));
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function sanitizeName(name, fallback = "") {
+  const value = String(name || "").trim();
+  if (!value || /^demo user$/i.test(value)) return fallback;
+  return value;
+}
+
+function sanitizeProfile(profile = {}) {
+  return {
+    ...profile,
+    name: sanitizeName(profile.name, ""),
+  };
+}
+
+function sanitizeDraftBody(body = "", profile = {}) {
+  const senderName = sanitizeName(profile.name, "");
+  if (!senderName) return body;
+  return String(body || "").replace(/\bDemo User\b/g, senderName);
 }
 
 async function ensureDirs() {
@@ -511,7 +550,54 @@ async function callGemini(system, user, maxTokens = 900) {
 }
 
 function parseJsonResponse(raw) {
-  return JSON.parse(String(raw || "").replace(/```json|```/g, "").trim());
+  const cleaned = String(raw || "").replace(/```json|```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return JSON.parse(cleaned.slice(start, end + 1));
+    }
+    throw new Error("Model did not return valid JSON.");
+  }
+}
+
+function fallbackOutreachDraft(profile, application, contact) {
+  const senderName = sanitizeName(profile?.name, "Candidate");
+  const senderTitle = profile?.title || "applicant";
+  const senderSchool = (profile?.education || [])
+    .map((item) => item.school)
+    .filter(Boolean)[0] || "my university";
+  const senderSkills = (profile?.skills || []).slice(0, 3).join(", ");
+  const appliedRole = application?.role || "the role";
+  const company = application?.company || contact?.company || "your company";
+  const contactName = contact?.name?.split(/\s+/)[0] || "there";
+
+  let askLine = "Would you be open to pointing my application in the right direction if appropriate?";
+  if ((contact?.bucket || "").toLowerCase() === "peer") {
+    askLine = "Would you be open to sharing any quick advice, or if appropriate, passing my application along internally?";
+  } else if ((contact?.bucket || "").toLowerCase() === "manager") {
+    askLine = "Would you be open to taking a quick look at my background or routing my application to the right team?";
+  }
+
+  const body = [
+    `Hi ${contactName},`,
+    "",
+    `I recently applied for ${appliedRole} at ${company} and wanted to reach out directly.`,
+    `I'm ${senderName}, a ${senderTitle} with a background from ${senderSchool}${senderSkills ? ` and experience in ${senderSkills}` : ""}.`,
+    askLine,
+    "",
+    "I've attached my resume for context. Thanks for your time.",
+    "",
+    "Best regards,",
+    senderName,
+  ].join("\n");
+
+  return {
+    subject: `${appliedRole} application at ${company}`,
+    body,
+  };
 }
 
 async function selectStrategicContacts(profile, application, candidates) {
@@ -620,14 +706,18 @@ async function generateOutreachDraft(profile, application, contact) {
     `Selection reason: ${contact.reason || "Relevant company insider."}`,
   ].join("\n");
 
-  const raw = GEMINI_API_KEY
-    ? await callGemini(system, user, 700)
-    : await callClaude(system, user, 700);
-  const parsed = parseJsonResponse(raw);
-  return {
-    subject: parsed.subject || `Application follow-up for ${application.company}`,
-    body: parsed.body || "",
-  };
+  try {
+    const raw = GEMINI_API_KEY
+      ? await callGemini(system, user, 700)
+      : await callClaude(system, user, 700);
+    const parsed = parseJsonResponse(raw);
+    return {
+      subject: parsed.subject || `Application follow-up for ${application.company}`,
+      body: parsed.body || "",
+    };
+  } catch {
+    return fallbackOutreachDraft(profile, application, contact);
+  }
 }
 
 async function runAssistantAction({ instruction, profile, contact, email, currentDraft, sendNow }) {
@@ -721,6 +811,94 @@ async function runAssistantAction({ instruction, profile, contact, email, curren
   return result;
 }
 
+async function runCoffeeChatTurn({ profile, contact, messages }) {
+  if (!contact?.name) {
+    throw new Error("Contact is required for simulator chat.");
+  }
+
+  const turnCount = Array.isArray(messages) ? messages.length : 0;
+  const history = (messages || [])
+    .map((msg) => `${msg.role === "assistant" ? contact.name : profile?.name || "User"}: ${msg.content}`)
+    .join("\n");
+
+  const system = [
+    "You are role-playing a realistic networking coffee chat contact.",
+    "Stay in character throughout.",
+    "Sound like a real professional, not a chatbot.",
+    "Be realistic and ask questions this person would actually ask in a coffee chat.",
+    "Start by asking about the user's background and interests if the conversation is just beginning.",
+    "If the user asks for a referral too early, gently redirect the conversation.",
+    "After 4-5 good exchanges, naturally hint that you may be open to helping.",
+    "Mention real aspects of working at the company when relevant.",
+    "Keep responses conversational and short, usually 1 to 3 sentences.",
+    "Do not ask a question in every single response.",
+    "Only ask one question at a time, and skip the question if a natural acknowledgment works better.",
+    "Avoid long explanations unless the user specifically asks for detail.",
+    "Use natural spoken language with occasional warmth, but do not sound overly polished.",
+    "Never use em dashes.",
+  ].join("\n");
+
+  const user = [
+    `Role-play contact: ${contact.name}, ${contact.role} at ${contact.company}.`,
+    `Contact school: ${contact.school || "Unknown"}.`,
+    `Contact bio: ${contact.bio || "No bio available"}.`,
+    `Contact tenure: ${contact.tenure || "Unknown tenure"}.`,
+    `Current turn count: ${turnCount}.`,
+    `User profile: ${JSON.stringify(profile || {})}`,
+    `Conversation so far:\n${history}`,
+    "Reply as the contact only.",
+  ].join("\n");
+
+  return await callClaude(system, user, 500);
+}
+
+async function generateCoffeeChatFollowUps({ profile, contact, outcome }) {
+  const system = [
+    "You write polished post-chat networking follow-ups.",
+    "Return strict JSON only.",
+    'Schema: {"thankYou":"", "checkIn":"", "referralAsk":""}',
+    "Keep each message under 80 words.",
+    "Never use em dashes.",
+    "Only make the referral ask appropriate if the conversation outcome supports it.",
+  ].join("\n");
+
+  const user = [
+    `User profile: ${JSON.stringify(profile || {})}`,
+    `Contact: ${JSON.stringify(contact || {})}`,
+    `Chat outcome: ${outcome}`,
+    "Generate: thank you (send today), check-in (1-2 weeks), referral ask (if appropriate).",
+  ].join("\n");
+
+  const raw = await callClaude(system, user, 700);
+  return parseJsonResponse(raw);
+}
+
+async function generateCoffeeChatFeedback({ profile, contact, messages }) {
+  const system = [
+    "You are an expert networking coach reviewing a completed coffee chat practice call.",
+    "Return strict JSON only.",
+    'Schema: {"summary":"", "strengths":["",""], "improvements":["",""], "nextTip":""}',
+    "Keep the summary under 70 words.",
+    "Give practical speaking feedback focused on clarity, pacing, warmth, curiosity, and timing.",
+    "Keep each strength and improvement to one sentence.",
+    "Never use em dashes.",
+  ].join("\n");
+
+  const transcript = (messages || [])
+    .map((msg) => `${msg.role === "assistant" ? contact?.name || "Contact" : profile?.name || "User"}: ${msg.content}`)
+    .join("\n");
+
+  const user = [
+    `User profile: ${JSON.stringify(profile || {})}`,
+    `Contact: ${JSON.stringify(contact || {})}`,
+    `Transcript:\n${transcript}`,
+    "Analyze how the user spoke in this networking conversation and return coaching feedback.",
+  ].join("\n");
+
+  const raw = await callClaude(system, user, 700);
+  return parseJsonResponse(raw);
+}
+
 function buildResumeAttachment(profile, resumeText) {
   const rawResume = (resumeText || "").trim();
   if (rawResume) {
@@ -775,6 +953,7 @@ function outreachKey(company, email) {
 }
 
 async function buildPendingOutreach(profile, applications, alreadySentKeys = new Set()) {
+  const cleanProfile = sanitizeProfile(profile);
   const pendingOutreach = [];
   const seenThisRun = new Set();
 
@@ -782,18 +961,18 @@ async function buildPendingOutreach(profile, applications, alreadySentKeys = new
     if (pendingOutreach.length >= MAX_OUTREACH_PER_RUN) break;
     const contacts = await lookupHunterContacts(application.company, application.fromEmail);
     const remainingSlots = MAX_OUTREACH_PER_RUN - pendingOutreach.length;
-    const selectedContacts = (await selectStrategicContacts(profile, application, contacts)).slice(
-      0,
-      Math.min(3, remainingSlots)
-    );
+      const selectedContacts = (await selectStrategicContacts(cleanProfile, application, contacts)).slice(
+        0,
+        Math.min(3, remainingSlots)
+      );
 
     for (const contact of selectedContacts) {
       if (pendingOutreach.length >= MAX_OUTREACH_PER_RUN) break;
       const key = outreachKey(application.company, contact.email);
       if (alreadySentKeys.has(key) || seenThisRun.has(key)) continue;
       seenThisRun.add(key);
-      const draft = await generateOutreachDraft(profile, application, contact);
-      pendingOutreach.push({
+        const draft = await generateOutreachDraft(cleanProfile, application, contact);
+        pendingOutreach.push({
         id: crypto.randomBytes(10).toString("hex"),
         generatedAt: nowIso(),
         company: application.company,
@@ -805,10 +984,10 @@ async function buildPendingOutreach(profile, applications, alreadySentKeys = new
         bucket: contact.bucket || "",
         reason: contact.reason || "",
         subject: draft.subject,
-        body: draft.body,
-      });
+          body: sanitizeDraftBody(draft.body, cleanProfile),
+        });
+      }
     }
-  }
 
   return pendingOutreach;
 }
@@ -820,7 +999,7 @@ async function sendApprovedDrafts(draftIds) {
   }
 
   const state = await getState();
-  const profile = state.profile;
+  const profile = sanitizeProfile(state.profile);
   if (!profile?.name) {
     throw new Error("Profile not synced yet. Upload your resume in CareerCompass first.");
   }
@@ -843,12 +1022,12 @@ async function sendApprovedDrafts(draftIds) {
   const outreachLog = [];
 
   for (const draft of selected) {
-    const sent = await sendGmailMessage(auth, {
-      to: draft.to,
-      subject: draft.subject,
-      body: draft.body,
-      attachment: resumeAttachment,
-    });
+      const sent = await sendGmailMessage(auth, {
+        to: draft.to,
+        subject: draft.subject,
+        body: sanitizeDraftBody(draft.body, profile),
+        attachment: resumeAttachment,
+      });
 
     outreachLog.push({
       company: draft.company,
@@ -943,6 +1122,7 @@ app.get("/api/health", async (_req, res) => {
 app.get("/api/automation/status", async (_req, res) => {
   const token = await readToken();
   const state = await getState();
+  const profile = sanitizeProfile(state.profile);
   res.json({
     configured: isConfigured(),
     gmailConnected: Boolean(token),
@@ -956,16 +1136,19 @@ app.get("/api/automation/status", async (_req, res) => {
     lastSyncAt: state.lastSyncAt || null,
     lastRunAt: state.lastRunAt,
     lastRunSummary: state.lastRunSummary,
-    profile: state.profile || null,
+    profile: profile || null,
     applications: state.applications || [],
-    pendingOutreach: (state.pendingOutreach || []).slice(0, 20),
+    pendingOutreach: (state.pendingOutreach || []).slice(0, 20).map((draft) => ({
+      ...draft,
+      body: sanitizeDraftBody(draft.body, profile),
+    })),
     outreachLog: (state.outreachLog || []).slice(0, 10),
-    profileSynced: Boolean(state.profile?.name),
+    profileSynced: Boolean(profile?.name),
   });
 });
 
 app.post("/api/profile", async (req, res) => {
-  const profile = req.body?.profile;
+  const profile = sanitizeProfile(req.body?.profile);
   const resumeText = req.body?.resumeText || "";
   if (!profile?.name) {
     return res.status(400).json({ error: "Profile payload is required." });
@@ -992,6 +1175,48 @@ app.post("/api/assistant/action", async (req, res) => {
     res.json({ ok: true, result });
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message || "Assistant action failed." });
+  }
+});
+
+app.post("/api/simulator/chat", async (req, res) => {
+  try {
+    const state = await getState();
+    const reply = await runCoffeeChatTurn({
+      profile: state.profile,
+      contact: req.body?.contact || null,
+      messages: req.body?.messages || [],
+    });
+    res.json({ ok: true, reply });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Simulator chat failed." });
+  }
+});
+
+app.post("/api/simulator/followups", async (req, res) => {
+  try {
+    const state = await getState();
+    const followUps = await generateCoffeeChatFollowUps({
+      profile: state.profile,
+      contact: req.body?.contact || null,
+      outcome: req.body?.outcome || "",
+    });
+    res.json({ ok: true, followUps });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Simulator follow-up generation failed." });
+  }
+});
+
+app.post("/api/simulator/analyze", async (req, res) => {
+  try {
+    const state = await getState();
+    const feedback = await generateCoffeeChatFeedback({
+      profile: state.profile,
+      contact: req.body?.contact || null,
+      messages: req.body?.messages || [],
+    });
+    res.json({ ok: true, feedback });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Simulator analysis failed." });
   }
 });
 
@@ -1103,7 +1328,14 @@ app.get("/api/hunter/company-search", async (req, res) => {
         "Industry Peer",
     }));
 
-    res.json({ ok: true, domain, people });
+    const demoContacts = DEMO_DOMAIN_CONTACTS[domain] || [];
+    const seenEmails = new Set(people.map((person) => String(person.email || "").toLowerCase()));
+    const mergedPeople = [
+      ...demoContacts.filter((person) => !seenEmails.has(String(person.email || "").toLowerCase())),
+      ...people,
+    ];
+
+    res.json({ ok: true, domain, people: mergedPeople });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message || "Hunter search failed." });
   }
