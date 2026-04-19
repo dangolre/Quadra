@@ -4,6 +4,14 @@ const path = require("path");
 const crypto = require("crypto");
 const cron = require("node-cron");
 const dotenv = require("dotenv");
+
+const BROKEN_LOCAL_PROXY_RE = /^http:\/\/(127\.0\.0\.1|localhost):9\/?$/i;
+["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].forEach((key) => {
+  if (BROKEN_LOCAL_PROXY_RE.test(process.env[key] || "")) {
+    delete process.env[key];
+  }
+});
+
 const { google } = require("googleapis");
 
 dotenv.config({ path: path.join(process.cwd(), ".env") });

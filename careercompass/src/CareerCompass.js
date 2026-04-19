@@ -757,19 +757,17 @@ export default function CareerCompass() {
     return Array.from(merged.values());
   };
   const updateTrackerStatus = (id, status) => {
-    setTracker((prev) => {
-      const existing = prev.find((entry) => trackerIdFor(entry) === id) || trackerBoard.find((entry) => trackerIdFor(entry) === id);
-      if (!existing) return prev;
-      const nextEntry = {
-        ...existing,
-        status,
-        followUpDue: computeFollowUpDue(status, existing.dateSent || existing.sentAt || existing.time),
-      };
-      if (prev.some((entry) => trackerIdFor(entry) === id)) {
-        return prev.map((entry) => (trackerIdFor(entry) === id ? nextEntry : entry));
-      }
-      return [...prev, nextEntry];
-    });
+    setTracker((prev) =>
+      prev.map((entry) =>
+        trackerIdFor(entry) === id
+          ? {
+              ...entry,
+              status,
+              followUpDue: computeFollowUpDue(status, entry.dateSent || entry.sentAt || entry.time),
+            }
+          : entry
+      )
+    );
   };
   const addTrack = (ct, status="Sent") => {
     const nextEntry = normalizeTrackerEntry({
@@ -1117,6 +1115,37 @@ export default function CareerCompass() {
               <button style={btn("ghost")} onClick={()=>setPg("onboard")}>Edit</button>
             </div>
             <div style={{display:"flex",flexWrap:"wrap",gap:"6px",marginTop:"12px"}}>{profile.skills?.map((sk,i)=><span key={i} style={tag}>{sk}</span>)}</div>
+            <div style={{marginTop:"16px",padding:"16px",background:"#fafaf9",border:`1px solid ${C.border}`,borderRadius:"14px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"12px",flexWrap:"wrap"}}>
+                <div>
+                  <h2 style={{fontSize:"16px",fontWeight:800,margin:0}}>Gmail</h2>
+                  <p style={{fontSize:"12px",color:C.sub,marginTop:"4px",lineHeight:1.6}}>
+                    Connect your Gmail here so CareerCompass can track applications, prepare outreach drafts, and send approved emails from your account.
+                  </p>
+                </div>
+                <span style={{fontSize:"11px",fontWeight:700,padding:"6px 10px",borderRadius:"999px",background:automationStatus?.gmailConnected?C.okLight:C.errLight,color:automationStatus?.gmailConnected?C.ok:C.err}}>
+                  {automationStatus?.gmailConnected ? "Connected" : "Not connected"}
+                </span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:"10px",marginTop:"14px"}}>
+                {[
+                  { label:"Connection", value: automationStatus?.gmailConnected ? "Ready" : "Needs OAuth" },
+                  { label:"Profile Sync", value: automationStatus?.profileSynced ? "Synced" : "Pending" },
+                  { label:"Tracked Jobs", value: `${automationStatus?.applications?.length || 0}` },
+                  { label:"Draft Queue", value: `${automationStatus?.pendingOutreach?.length || 0}` },
+                ].map((item) => (
+                  <div key={item.label} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:"12px",padding:"12px 14px"}}>
+                    <p style={{fontSize:"11px",color:C.muted,marginBottom:"4px"}}>{item.label}</p>
+                    <p style={{fontSize:"13px",fontWeight:700}}>{item.value}</p>
+                  </div>
+                ))}
+              </div>
+              <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginTop:"14px"}}>
+                {!automationStatus?.gmailConnected && <button style={btn("primary")} onClick={connectGmailAutomation}>Connect Gmail</button>}
+                <button style={btn("secondary")} onClick={refreshAutomationStatus}>Refresh Gmail Status</button>
+                <button style={btn("ghost")} onClick={()=>setPg("tracker")}>Open Job Tracker</button>
+              </div>
+            </div>
           </div>
 
           <div style={{...card,border:`1px solid ${C.primary}33`}}>
