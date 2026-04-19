@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import BuildProfile from "./BuildProfile";
 import LinkedInPipeline from "./LinkedInPipeline";
 
@@ -98,7 +98,20 @@ export default function CareerCompass() {
       const raw = window.localStorage.getItem(key);
       return raw ? JSON.parse(raw) : fallback;
     } catch {
+      try {
+        window.localStorage.removeItem(key);
+      } catch {}
       return fallback;
+    }
+  };
+  const readApiJson = async (response, fallbackMessage = "Server returned invalid JSON.") => {
+    const raw = await response.text();
+    try {
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      const compact = raw.replace(/\s+/g, " ").trim();
+      const sample = compact.slice(0, 140);
+      throw new Error(sample ? `${fallbackMessage} ${sample}` : fallbackMessage);
     }
   };
   const [pg, setPg] = useState("landing");
@@ -112,7 +125,7 @@ export default function CareerCompass() {
   });
   const [selCo, setSelCo] = useState(null);
   const [selCt, setSelCt] = useState(null);
-  const [tracker, setTracker] = useState([]);
+  const [tracker, setTracker] = useState(() => readStoredJson("careercompass_tracker", []));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [msgPlat, setMsgPlat] = useState("linkedin");
@@ -147,6 +160,8 @@ export default function CareerCompass() {
   const [assistantError, setAssistantError] = useState("");
   const [assistantResult, setAssistantResult] = useState(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [linkedInSim, setLinkedInSim] = useState({ open: false, contact: null, note: "", addNote: true, sent: false });
+  const [pipelineFollowUps, setPipelineFollowUps] = useState(() => readStoredJson("cc_pipeline_followup", []));
   const chatEnd = useRef(null);
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [chat]);
@@ -165,6 +180,22 @@ export default function CareerCompass() {
     } catch {}
   }, [resume]);
   useEffect(() => {
+    try {
+      if (tracker?.length) window.localStorage.setItem("careercompass_tracker", JSON.stringify(tracker));
+      else window.localStorage.removeItem("careercompass_tracker");
+    } catch {}
+  }, [tracker]);
+  useEffect(() => {
+    const syncFollowUps = () => setPipelineFollowUps(readStoredJson("cc_pipeline_followup", []));
+    syncFollowUps();
+    window.addEventListener("storage", syncFollowUps);
+    window.addEventListener("focus", syncFollowUps);
+    return () => {
+      window.removeEventListener("storage", syncFollowUps);
+      window.removeEventListener("focus", syncFollowUps);
+    };
+  }, []);
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("gmail") === "connected" && automationStatus?.gmailConnected && !oauthTrackerTriggered) {
       setOauthTrackerTriggered(true);
@@ -177,7 +208,7 @@ export default function CareerCompass() {
   const refreshAutomationStatus = async () => {
     try {
       const response = await fetch(`${apiBase}/automation/status`);
-      const data = await response.json();
+      const data = await readApiJson(response, "Automation status returned invalid JSON.");
       if (!profile?.name && data.profile?.name) {
         setProfile(data.profile);
       }
@@ -216,7 +247,7 @@ export default function CareerCompass() {
     setAutomationBusy(true);
     try {
       const response = await fetch(`${apiBase}/automation/run`, { method: "POST" });
-      const data = await response.json();
+      const data = await readApiJson(response, "Automation run returned invalid JSON.");
       if (!response.ok) throw new Error(data.error || "Automation run failed.");
       await refreshAutomationStatus();
       if (!silent) alert(`Tracker finished. Applications found: ${data.result?.applicationsFound || 0}. Drafts ready for review: ${data.result?.draftsPrepared || 0}.`);
@@ -235,7 +266,7 @@ export default function CareerCompass() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ draftIds }),
       });
-      const data = await response.json();
+      const data = await readApiJson(response, "Approved-send response returned invalid JSON.");
       if (!response.ok) throw new Error(data.error || "Sending approved drafts failed.");
       await refreshAutomationStatus();
       alert(`Sent ${data.result?.sentCount || 0} email${(data.result?.sentCount || 0) === 1 ? "" : "s"}.`);
@@ -256,7 +287,7 @@ export default function CareerCompass() {
       if (contentType.includes("text/html")) {
         throw new Error("Backend not reachable. Make sure `npm run server` is running on port 3001.");
       }
-      const data = await response.json();
+      const data = await readApiJson(response, "Application sync returned invalid JSON.");
       if (!response.ok || data.ok === false) {
         throw new Error(data.error || "Application sync failed.");
       }
@@ -309,7 +340,7 @@ export default function CareerCompass() {
 
       setAutomationBusy(true);
       const response = await fetch(`${apiBase}/automation/run`, { method: "POST" });
-      const data = await response.json();
+      const data = await readApiJson(response, "Pipeline run returned invalid JSON.");
       if (!response.ok) throw new Error(data.error || "Pipeline run failed.");
 
       await refreshAutomationStatus();
@@ -343,7 +374,7 @@ export default function CareerCompass() {
       if ((response.headers.get("content-type") || "").includes("text/html")) {
         throw new Error("The backend returned HTML instead of JSON. Make sure `npm run server` is running on port 3001.");
       }
-      const data = await response.json();
+      const data = await readApiJson(response, "Hunter search returned invalid JSON.");
       if (!response.ok) throw new Error(data.error || "Hunter search failed.");
       setCompanyPeople(data.people || []);
       setLastCompanySearch(data.domain || query);
@@ -490,7 +521,7 @@ export default function CareerCompass() {
       if (contentType.includes("text/html")) {
         throw new Error("Assistant backend route is not available yet. Restart `npm run dev:all` so the server picks up /api/assistant/action.");
       }
-      const data = await response.json();
+      const data = await readApiJson(response, "Assistant action returned invalid JSON.");
       if (!response.ok) throw new Error(data.error || "Assistant action failed.");
       setAssistantResult(data.result || null);
       if (data.result?.body && data.result?.action?.includes("email")) {
@@ -521,6 +552,30 @@ export default function CareerCompass() {
       .replace(/\[Company\]/gi, contact.company || "")
       .replace(/\[Title\]/gi, profile.title || "");
     setMsg(cleaned); setBusy(false);
+    return cleaned;
+  };
+
+  const openLinkedInSimulation = (contact, note = "") => {
+    setSelCt(contact);
+    setMsgPlat("linkedin");
+    setLinkedInSim({
+      open: true,
+      contact,
+      note: note || "",
+      addNote: true,
+      sent: false,
+    });
+  };
+
+  const launchLinkedInSimulation = async (contact, note) => {
+    const nextNote = note || await genMsg(contact, "linkedin");
+    openLinkedInSimulation(contact, nextNote || "");
+  };
+
+  const submitLinkedInSimulation = () => {
+    if (!linkedInSim.contact) return;
+    addTrack(linkedInSim.contact, "Sent");
+    setLinkedInSim((prev) => ({ ...prev, sent: true }));
   };
 
   const startSim = (ct) => { setSimCt(ct); setChat([{ role:"assistant", content:`Hi! Thanks for setting up this chat. I'm ${ct.name}, ${ct.role} at ${ct.company}. Tell me about yourself, what got you interested in this field?` }]); setChatSum(""); setPg("sim"); };
@@ -528,8 +583,20 @@ export default function CareerCompass() {
   const sendChat = async () => {
     if (!chatIn.trim() || busy) return; const m = chatIn.trim(); setChatIn("");
     const ms = [...chat, { role:"user", content: m }]; setChat(ms); setBusy(true);
-    const r = await aiChat(`Role-play as ${simCt.name}, ${simCt.role} at ${simCt.company}. Bio: ${simCt.bio}. School: ${simCt.school}. Stay in character. Friendly but professional. 2-4 sentences. No em dashes. After 4-5 good exchanges, hint you'd help.`, ms.map(x=>({role:x.role,content:x.content})));
-    setChat([...ms, { role:"assistant", content: r }]); setBusy(false);
+    try {
+      const response = await fetch(`${apiBase}/simulator/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contact: simCt, messages: ms }),
+      });
+      const data = await readApiJson(response, "Simulator chat returned invalid JSON.");
+      if (!response.ok) throw new Error(data.error || "Simulator chat failed.");
+      setChat([...ms, { role:"assistant", content: data.reply || "No response." }]);
+    } catch (error) {
+      setChat([...ms, { role:"assistant", content: error.message || "Simulator chat failed." }]);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const genFollowUp = async (reply) => {
@@ -540,8 +607,28 @@ export default function CareerCompass() {
 
   const genPostChat = async () => {
     if (!chatSum.trim()) return; setBusy(true);
-    const r = await ai("Generate THREE follow-up messages. Headers: 'THANK YOU (send today):', 'CHECK-IN (1-2 weeks):', 'REFERRAL ASK:'. Each under 80 words. No em dashes.", `User: ${profile?.name}, ${profile?.title}. Chat with ${simCt?.name} (${simCt?.role}, ${simCt?.company}). How it went: ${chatSum}`);
-    setFuData({ reply: { from: simCt?.name, company: simCt?.company }, followUp: r }); setPg("fu"); setBusy(false);
+    try {
+      const response = await fetch(`${apiBase}/simulator/followups`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contact: simCt, outcome: chatSum }),
+      });
+      const data = await readApiJson(response, "Simulator follow-up generation returned invalid JSON.");
+      if (!response.ok) throw new Error(data.error || "Simulator follow-up generation failed.");
+      const followUps = data.followUps || {};
+      const formatted = [
+        `THANK YOU (send today):\n${followUps.thankYou || ""}`,
+        `CHECK-IN (1-2 weeks):\n${followUps.checkIn || ""}`,
+        `REFERRAL ASK:\n${followUps.referralAsk || ""}`,
+      ].join("\n\n");
+      setFuData({ reply: { from: simCt?.name, company: simCt?.company }, followUp: formatted });
+      setPg("fu");
+    } catch (error) {
+      setFuData({ reply: { from: simCt?.name, company: simCt?.company }, followUp: error.message || "Simulator follow-up generation failed." });
+      setPg("fu");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const [autoContact, setAutoContact] = useState(null);
@@ -628,15 +715,210 @@ export default function CareerCompass() {
     setBusy(false);
   };
 
+  const trackerIdFor = (ct = {}) =>
+    ct.id || ct.email || ct.to || `${ct.name || ct.contactName || "contact"}-${ct.company || "company"}`;
+  const formatTrackerDate = (value) => {
+    if (!value) return new Date().toLocaleDateString();
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleDateString();
+  };
+  const computeFollowUpDue = (status, value) => {
+    if (status === "Coffee Chat Scheduled") return "Scheduled";
+    if (status === "Referral Received") return "Referral in progress";
+    if (status === "Replied") return "Reply received";
+    if (status !== "Sent" && status !== "No Response") return null;
+    const base = value ? new Date(value) : new Date();
+    if (Number.isNaN(base.getTime())) return status === "Sent" ? "In 3 days" : "Follow up soon";
+    const due = new Date(base.getTime() + 3 * 24 * 60 * 60 * 1000);
+    return due.toLocaleDateString();
+  };
+  const normalizeTrackerEntry = (entry = {}) => {
+    const status = entry.status || "Sent";
+    const dateSent = formatTrackerDate(entry.dateSent || entry.sentAt || entry.time);
+    return {
+      ...entry,
+      id: trackerIdFor(entry),
+      name: entry.name || entry.contactName || "Contact",
+      role: entry.role || "Professional",
+      company: entry.company || "Company",
+      status,
+      dateSent,
+      followUpDue: entry.followUpDue ?? computeFollowUpDue(status, entry.dateSent || entry.sentAt || entry.time),
+      source: entry.source || "CareerCompass",
+    };
+  };
+  const mergeTrackerEntries = (...groups) => {
+    const merged = new Map();
+    groups.flat().filter(Boolean).forEach((entry) => {
+      const normalized = normalizeTrackerEntry(entry);
+      const existing = merged.get(normalized.id);
+      merged.set(normalized.id, existing ? { ...normalized, ...existing } : normalized);
+    });
+    return Array.from(merged.values());
+  };
+  const updateTrackerStatus = (id, status) => {
+    setTracker((prev) => {
+      const existing = prev.find((entry) => trackerIdFor(entry) === id) || trackerBoard.find((entry) => trackerIdFor(entry) === id);
+      if (!existing) return prev;
+      const nextEntry = {
+        ...existing,
+        status,
+        followUpDue: computeFollowUpDue(status, existing.dateSent || existing.sentAt || existing.time),
+      };
+      if (prev.some((entry) => trackerIdFor(entry) === id)) {
+        return prev.map((entry) => (trackerIdFor(entry) === id ? nextEntry : entry));
+      }
+      return [...prev, nextEntry];
+    });
+  };
   const addTrack = (ct, status="Sent") => {
-    if (tracker.find(c=>c.id===ct.id)) return;
-    setTracker(p=>[...p,{...ct,status,dateSent:new Date().toLocaleDateString(),followUpDue:status==="Sent"?"In 3 days":null}]);
+    const nextEntry = normalizeTrackerEntry({
+      ...ct,
+      id: trackerIdFor(ct),
+      status,
+      dateSent: new Date().toISOString(),
+      source: ct.source || (status === "Sent" ? "LinkedIn simulation" : "Manual"),
+    });
+    setTracker((prev) => {
+      if (prev.find((entry) => trackerIdFor(entry) === nextEntry.id)) {
+        return prev.map((entry) => (trackerIdFor(entry) === nextEntry.id ? { ...entry, ...nextEntry } : entry));
+      }
+      return [...prev, nextEntry];
+    });
   };
 
   const filtJobs = DEMO_JOBS.filter(j => { if (jf.hideGhost&&j.ghost) return false; if (jf.level&&j.level!==jf.level) return false; if (jf.location&&!j.location.toLowerCase().includes(jf.location.toLowerCase())) return false; return true; });
-  const filtTrack = tracker.filter(c => stFilt==="All"?true:stFilt==="Needs Follow-up"?c.status==="Sent"||c.status==="No Response":c.status===stFilt);
-  const filtNotif = NOTIFICATIONS.filter(n => nFilt==="all"?true:n.type===nFilt);
   const allCts = Object.values(DEMO_CONTACTS).flat();
+  const outreachTrackerEntries = (automationStatus?.outreachLog || []).slice(0, 20).map((entry) => ({
+    id: trackerIdFor({ ...entry, email: entry.to }),
+    name: entry.contactName || entry.to?.split("@")[0] || "Contact",
+    role: entry.role || "Professional",
+    company: entry.company,
+    email: entry.to,
+    status: "Sent",
+    sentAt: entry.sentAt,
+    source: "Gmail automation",
+    note: entry.subject,
+    platform: "Gmail",
+  }));
+  const pipelineTrackerEntries = (pipelineFollowUps || []).map((item) => ({
+    id: trackerIdFor(item),
+    name: item.name,
+    role: item.role,
+    company: item.company,
+    email: item.email,
+    status:
+      item.connectionStatus === "connected"
+        ? item.followUpSentAt
+          ? "Sent"
+          : "Replied"
+        : "No Response",
+    sentAt: item.followUpSentAt || item.sentAt || item.connectedAt || item.updatedAt,
+    source: "LinkedIn pipeline",
+    note: item.followUpType ? `${item.followUpType} follow-up` : "LinkedIn connection",
+    platform: "LinkedIn",
+  }));
+  const replyTrackerEntries = SIMULATED_REPLIES.map((reply) => ({
+    id: trackerIdFor({ name: reply.from, company: reply.company }),
+    name: reply.from,
+    role: allCts.find((contact) => contact.name === reply.from && contact.company === reply.company)?.role || "Professional",
+    company: reply.company,
+    status:
+      reply.action === "Schedule coffee chat"
+        ? "Coffee Chat Scheduled"
+        : reply.action === "Accept referral offer"
+          ? "Referral Received"
+          : "Replied",
+    time: reply.time,
+    source: `${reply.platform} reply`,
+    note: reply.preview,
+    platform: reply.platform,
+  }));
+  const trackerBoard = mergeTrackerEntries(outreachTrackerEntries, pipelineTrackerEntries, replyTrackerEntries, tracker);
+  const statusCounts = STATUS_LIST.reduce((acc, status) => {
+    acc[status] = trackerBoard.filter((entry) =>
+      status === "All"
+        ? true
+        : status === "Needs Follow-up"
+          ? entry.status === "Sent" || entry.status === "No Response"
+          : entry.status === status
+    ).length;
+    return acc;
+  }, {});
+  const filtTrack = trackerBoard.filter(c => stFilt==="All"?true:stFilt==="Needs Follow-up"?c.status==="Sent"||c.status==="No Response":c.status===stFilt);
+  const todoItems = useMemo(() => {
+    const approvalItems = (automationStatus?.pendingOutreach || []).map((draft, index) => ({
+      id: `approval-${draft.id || index}`,
+      type: "follow-up",
+      category: "approval",
+      message: `Review outreach draft for ${draft.contactName || draft.company}`,
+      detail: `Draft ready for ${draft.to}. ${draft.appliedRole ? `Role: ${draft.appliedRole}. ` : ""}Approve or edit before sending.`,
+      company: draft.company,
+      contact: draft.contactName,
+      time: draft.generatedAt ? new Date(draft.generatedAt).toLocaleString() : "Ready now",
+      draft,
+      actionLabel: "Review Draft →",
+    }));
+
+    const followUpItems = (pipelineFollowUps || [])
+      .filter((item) => item.connectionStatus === "connected")
+      .map((item) => ({
+        id: `followup-${item.id}`,
+        type: "follow-up",
+        category: "followup",
+        message: `Send follow-up to ${item.name}`,
+        detail: item.followUpOptions
+          ? "A follow-up draft is ready in your LinkedIn Pipeline queue."
+          : "They accepted your connection. Generate a coffee chat, referral, or curiosity follow-up.",
+        company: item.company,
+        contact: item.name,
+        time: item.followUpSentAt ? `Last sent ${new Date(item.followUpSentAt).toLocaleDateString()}` : "Ready now",
+        followUp: item,
+        actionLabel: item.followUpOptions ? "Open Follow-up Queue →" : "Draft Follow-up →",
+      }));
+
+    const replyItems = SIMULATED_REPLIES.map((reply) => ({
+      id: `reply-${reply.id}`,
+      type: "reply",
+      category: "reply",
+      message: `${reply.from} replied via ${reply.platform}`,
+      detail: reply.preview,
+      company: reply.company,
+      contact: reply.from,
+      time: reply.time,
+      reply,
+      actionLabel: "Generate Follow-up →",
+    }));
+
+    return [...approvalItems, ...followUpItems, ...replyItems];
+  }, [automationStatus, pipelineFollowUps]);
+
+  const filtNotif = todoItems.filter(n => nFilt==="all"?true:n.type===nFilt);
+
+  const openPipelineFollowUpQueue = () => {
+    try {
+      window.localStorage.setItem("cc_pipeline_nav_request", JSON.stringify({ subTab: "followup", ts: Date.now() }));
+    } catch {}
+    setPg("pipeline");
+  };
+
+  const handleTodoAction = (item) => {
+    if (item.category === "reply" && item.reply) {
+      genFollowUp(item.reply);
+      setPg("replies");
+      return;
+    }
+
+    if (item.category === "approval") {
+      setPg("dashboard");
+      return;
+    }
+
+    if (item.category === "followup") {
+      openPipelineFollowUpQueue();
+    }
+  };
+
   const searchQuickPicks = [...new Set([
     ...(automationStatus?.applications?.map((item) => item.company).filter(Boolean) || []),
     ...(profile?.interests || []),
@@ -698,9 +980,9 @@ export default function CareerCompass() {
             <button style={tab(pg==="tracker")} onClick={()=>setPg("tracker")}>Tracker{tracker.length>0&&` (${tracker.length})`}</button>
             <button style={tab(pg==="pipeline")} onClick={()=>setPg("pipeline")}>LinkedIn Pipeline</button>
             <button style={tab(pg==="replies")} onClick={()=>setPg("replies")}>Replies ({SIMULATED_REPLIES.length})</button>
-            <button style={{ ...tab(pg==="todo"),position:"relative" }} onClick={()=>setPg("todo")}>
-              To-Do<span style={{ position:"absolute",top:2,right:2,width:7,height:7,borderRadius:"50%",background:C.err }} />
-            </button>
+              <button style={{ ...tab(pg==="todo"),position:"relative" }} onClick={()=>setPg("todo")}>
+                To-Do{todoItems.length > 0 && <span style={{ position:"absolute",top:2,right:2,width:7,height:7,borderRadius:"50%",background:C.err }} />}
+              </button>
           </div>
         </nav>
       )}
@@ -964,117 +1246,13 @@ export default function CareerCompass() {
             )}
           </div>
 
-          <h2 style={{fontSize:"18px",fontWeight:700,marginTop:"28px",marginBottom:"12px"}}>Target Companies</h2>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:"12px"}}>
-            {[{n:"Google",l:"G",c:"#4285F4"},{n:"Amazon",l:"A",c:"#FF9900"},{n:"Meta",l:"M",c:"#0668E1"}].map(co=>(
-              <div key={co.n} style={{...card,cursor:"pointer",border:selCo===co.n?`2px solid ${C.primary}`:`1px solid ${C.border}`,padding:"18px"}} onClick={()=>{setSelCo(co.n);setSelCt(null);setMsg("");setFoundEmail(null);}}>
-                <div style={{display:"flex",alignItems:"center",gap:"10px"}}><div style={av(co.c)}>{co.l}</div><div><h3 style={{fontSize:"15px",fontWeight:700,margin:0}}>{co.n}</h3><p style={{fontSize:"12px",color:C.primary,fontWeight:600,margin:0}}>{DEMO_CONTACTS[co.n]?.length} contacts</p></div></div>
-              </div>
-            ))}
-          </div>
-
-          {selCo && (
-            <div style={{marginTop:"24px",animation:"fadeIn 0.3s ease"}}>
-              <h2 style={{fontSize:"18px",fontWeight:700,marginBottom:"10px"}}>Contacts at {selCo}</h2>
-              {DEMO_CONTACTS[selCo]?.map(ct=>(
-                <div key={ct.id} style={{...card,cursor:"pointer",border:selCt?.id===ct.id?`2px solid ${C.primary}`:`1px solid ${C.border}`,padding:"18px"}} onClick={()=>{setSelCt(ct);setMsg("");setFoundEmail(null);}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                    <div style={{display:"flex",gap:"12px",alignItems:"center"}}><div style={av()}>{ct.name[0]}</div><div><h3 style={{fontSize:"14px",fontWeight:700,margin:0}}>{ct.name}</h3><p style={{fontSize:"12px",color:C.sub,margin:"1px 0"}}>{ct.role} · {ct.tenure}</p><p style={{fontSize:"11px",color:C.muted}}>{ct.school}</p></div></div>
-                    <div style={{display:"flex",gap:"6px",alignItems:"center"}}><span style={badge(ct.type)}>{ct.type}</span><span style={{fontSize:"10px",color:C.muted,background:"#f5f5f4",padding:"2px 8px",borderRadius:"10px"}}>{MESSAGE_STYLE_MAP[ct.type]?.label}</span></div>
-                  </div>
-                  <p style={{fontSize:"12px",color:C.sub,marginTop:"8px",lineHeight:1.5}}>{ct.bio}</p>
-                  {selCt?.id===ct.id && (
-                    <div style={{marginTop:"14px",animation:"fadeIn 0.2s ease"}}>
-                      <div style={{height:1,background:C.border,margin:"12px 0"}} />
-                      <div style={{display:"flex",gap:"12px",alignItems:"center"}}>
-                        {/* Email icon */}
-                        <button
-                          style={{width:44,height:44,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"20px",transition:"all 0.15s",boxShadow:C.shadow}}
-                          title="Find email & generate message"
-                          onClick={e=>{e.stopPropagation();lookupEmail(ct.name,ct.company);genMsg(ct,"email");addTrack(ct,"Sent");}}
-                        >✉️</button>
-                        {/* LinkedIn icon */}
-                        <button
-                          style={{width:44,height:44,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"20px",transition:"all 0.15s",boxShadow:C.shadow}}
-                          title="Generate LinkedIn connection note"
-                          onClick={e=>{e.stopPropagation();genMsg(ct,"linkedin");addTrack(ct,"Sent");}}
-                        >
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="#0077B5"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
-                        </button>
-                        {/* Mic icon */}
-                        <button
-                          style={{width:44,height:44,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"20px",transition:"all 0.15s",boxShadow:C.shadow}}
-                          title="Practice coffee chat"
-                          onClick={e=>{e.stopPropagation();startSim(ct);}}
-                        >🎙️</button>
-                      </div>
-
-                      {/* Email lookup result */}
-                      {foundEmail && (
-                        <div style={{marginTop:"10px",padding:"10px 14px",background:foundEmail.confidence>50?C.okLight:C.accentLight,borderRadius:"10px",fontSize:"13px",animation:"fadeIn 0.3s ease",border:`1px solid ${foundEmail.confidence>50?C.ok+"33":C.accent+"33"}`}}>
-                          <span style={{fontWeight:700,color:foundEmail.confidence>50?C.ok:C.accent}}>📧 {foundEmail.email}</span>
-                          {foundEmail.verified && <span style={{marginLeft:"6px",fontSize:"11px",color:C.ok,fontWeight:600}}>✓ Verified</span>}
-                          <p style={{fontSize:"11px",color:C.sub,margin:"2px 0 0"}}>via {foundEmail.source}</p>
-                        </div>
-                      )}
-
-                      {/* Generated message inline */}
-                      {msg && selCt?.id===ct.id && (
-                        <div style={{marginTop:"12px",animation:"fadeIn 0.3s ease"}}>
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
-                            <p style={{fontSize:"12px",color:C.sub,margin:0}}>
-                              {msgPlat==="linkedin"?`LinkedIn note · ${msg.length}/300 chars`:"Email message"} · {MESSAGE_STYLE_MAP[ct.type]?.label}
-                            </p>
-                          </div>
-                          {msgPlat==="linkedin"&&msg.length>300 && <p style={{fontSize:"12px",color:C.err,fontWeight:600,marginBottom:"6px"}}>⚠️ Over 300 chars</p>}
-                          <textarea readOnly value={msg} style={mboxArea(msgPlat)} onClick={()=>setShowFullMsg(true)} title="Click to view the full message" />
-                          <div style={{marginTop:"10px",display:"flex",gap:"8px"}}>
-                            {/* Copy icon */}
-                            <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px",transition:"all 0.15s",boxShadow:C.shadow}} title="Copy message" onClick={()=>navigator.clipboard.writeText(msg)}>📋</button>
-                            {/* Open LinkedIn icon */}
-                            {msgPlat==="linkedin" && <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s",boxShadow:C.shadow}} title="Open LinkedIn" onClick={()=>window.open(selCt.linkedin,"_blank")}><svg width="16" height="16" viewBox="0 0 24 24" fill="#0077B5"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg></button>}
-                            {/* Open Email icon */}
-                            {msgPlat==="email" && <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.border}`,background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px",transition:"all 0.15s",boxShadow:C.shadow}} title="Open in email" onClick={()=>window.open(`mailto:${foundEmail?.email||selCt.email}?body=${encodeURIComponent(msg)}`,"_blank")}>📨</button>}
-                            {/* Auto-Connect icon */}
-                            {msgPlat==="linkedin" && <button style={{width:36,height:36,borderRadius:"50%",border:`1.5px solid ${C.accent}`,background:C.accentLight,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px",transition:"all 0.15s",boxShadow:C.shadow}} title="Auto-Connect on LinkedIn" onClick={()=>runAuto(selCt)}>🤖</button>}
-                          </div>
-                        </div>
-                      )}
-
-                      <div style={{marginTop:"14px",padding:"14px",background:"#fafaf9",border:`1px solid ${C.border}`,borderRadius:"12px"}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"10px",flexWrap:"wrap",marginBottom:"8px"}}>
-                          <div>
-                            <h4 style={{fontSize:"14px",fontWeight:800,margin:0}}>Claude Networking Assistant</h4>
-                            <p style={{fontSize:"12px",color:C.sub,marginTop:"4px"}}>Tell the assistant what to do with this contact, like draft an email or send it from Gmail.</p>
-                          </div>
-                          {foundEmail?.email && <span style={{fontSize:"11px",fontWeight:700,color:C.primaryDark,background:C.primaryLight,padding:"6px 10px",borderRadius:"999px"}}>{foundEmail.email}</span>}
-                        </div>
-                        <textarea
-                          style={{...inp,minHeight:"84px",resize:"vertical"}}
-                          placeholder='Example: Write a concise email asking for a quick internal referral. Or: Send the email now.'
-                          value={assistantInstruction}
-                          onChange={e=>setAssistantInstruction(e.target.value)}
-                        />
-                        <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginTop:"10px"}}>
-                          <button style={btn("secondary")} onClick={()=>runClaudeAssistant()} disabled={assistantBusy}>{assistantBusy ? "Thinking..." : "Ask Assistant"}</button>
-                          <button style={btn("amber")} onClick={()=>runClaudeAssistant({ sendNow: true })} disabled={assistantBusy || !automationStatus?.gmailConnected}>{assistantBusy ? "Sending..." : "Ask + Send Email"}</button>
-                        </div>
-                        {assistantError && <div style={{marginTop:"10px",padding:"10px 12px",background:C.errLight,border:`1px solid ${C.err}33`,borderRadius:"10px",fontSize:"12px",color:C.err}}>{assistantError}</div>}
-                        {assistantResult && (
-                          <div style={{marginTop:"10px",padding:"12px",background:"#fff",border:`1px solid ${C.border}`,borderRadius:"10px"}}>
-                            <p style={{fontSize:"12px",fontWeight:700,marginBottom:"6px"}}>Assistant Reply</p>
-                            <p style={{fontSize:"12px",color:C.text,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{assistantResult.reply}</p>
-                            {assistantResult.subject && <p style={{fontSize:"12px",color:C.sub,marginTop:"8px"}}><strong>Subject:</strong> {assistantResult.subject}</p>}
-                            {assistantResult.reason && <p style={{fontSize:"12px",color:C.sub,marginTop:"6px"}}><strong>Reason:</strong> {assistantResult.reason}</p>}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
+            <div style={{marginTop:"28px",padding:"16px 18px",background:"#fafaf9",border:`1px solid ${C.border}`,borderRadius:"14px"}}>
+              <h2 style={{fontSize:"18px",fontWeight:700,marginBottom:"6px"}}>Target Companies & Contacts</h2>
+              <p style={{fontSize:"13px",color:C.sub,lineHeight:1.6}}>
+                This company browser now lives inside the LinkedIn Pipeline so discovery, outreach, and follow-up all happen in one workflow.
+              </p>
+              <button style={{...btn("secondary"),marginTop:"12px"}} onClick={()=>setPg("pipeline")}>Open LinkedIn Pipeline</button>
             </div>
-          )}
 
 
           {showFullMsg && msg && (
@@ -1181,7 +1359,7 @@ export default function CareerCompass() {
             {filtJobs.map(j=>(
               <div key={j.id} style={{...card,padding:"18px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div><h3 style={{fontSize:"15px",fontWeight:700,margin:0}}>{j.title}</h3><p style={{fontSize:"13px",color:C.sub,margin:"3px 0"}}>{j.company} · {j.location}</p><div style={{display:"flex",gap:"6px",marginTop:"6px"}}><span style={tag}>{j.level}</span><span style={{...tag,background:"#f5f5f4",color:C.sub}}>{j.posted}</span>{j.ghost&&<span style={{...tag,background:C.errLight,color:C.err}}>⚠️ Ghost job</span>}</div></div>
-                <button style={btn("secondary")} onClick={()=>{setSelCo(j.company);setPg("dashboard");}}>View Contacts →</button>
+                <button style={btn("secondary")} onClick={()=>setPg("pipeline")}>View Contacts →</button>
               </div>
             ))}
           </>}
@@ -1246,6 +1424,9 @@ export default function CareerCompass() {
         <LinkedInPipeline
           profile={profile}
           applications={automationStatus?.applications || []}
+          demoContacts={DEMO_CONTACTS}
+          targetCompanies={profile?.interests || []}
+          onOpenLinkedInSimulation={openLinkedInSimulation}
         />
       )}
 
@@ -1293,16 +1474,58 @@ export default function CareerCompass() {
               </div>
             )}
           </div>
-          <div style={{display:"flex",gap:"6px",marginBottom:"16px",flexWrap:"wrap"}}>{STATUS_LIST.map(st=><button key={st} style={tab(stFilt===st)} onClick={()=>setStFilt(st)}>{st}</button>)}</div>
-          {filtTrack.length===0 ? <div style={{...card,textAlign:"center",padding:"50px"}}><p style={{fontSize:"32px",marginBottom:"10px"}}>📭</p><p style={{fontSize:"14px",color:C.sub}}>No contacts in this category.</p><button style={{...btn("primary"),marginTop:"14px"}} onClick={()=>setPg("dashboard")}>Discover Contacts →</button></div>
-          : filtTrack.map((ct,i)=>(
-            <div key={i} style={card}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{display:"flex",gap:"10px",alignItems:"center"}}><div style={av()}>{ct.name[0]}</div><div><h3 style={{fontSize:"14px",fontWeight:700,margin:0}}>{ct.name}</h3><p style={{fontSize:"12px",color:C.sub}}>{ct.role} at {ct.company}</p></div></div>
-                <div style={{display:"flex",gap:"8px",alignItems:"center"}}><div style={sDot(ct.status)} /><select style={sel} value={ct.status} onChange={e=>setTracker(p=>p.map(c=>c.id===ct.id?{...c,status:e.target.value}:c))}>{["Sent","Replied","No Response","Coffee Chat Scheduled","Referral Received"].map(o=><option key={o}>{o}</option>)}</select></div>
+          <div style={{display:"flex",gap:"6px",marginBottom:"16px",flexWrap:"wrap"}}>
+            {STATUS_LIST.map(st => (
+              <button key={st} style={tab(stFilt===st)} onClick={()=>setStFilt(st)}>
+                {st} <span style={{opacity:0.75}}>({statusCounts[st] || 0})</span>
+              </button>
+            ))}
+          </div>
+          {filtTrack.length===0 ? (
+            <div style={{...card,textAlign:"center",padding:"50px"}}>
+              <p style={{fontSize:"32px",marginBottom:"10px"}}>Inbox</p>
+              <p style={{fontSize:"14px",color:C.sub}}>No contacts in this category yet.</p>
+              <p style={{fontSize:"12px",color:C.muted,marginTop:"6px"}}>Run the Gmail pipeline, send a LinkedIn request, or open the reply inbox to populate this board.</p>
+              <button style={{...btn("primary"),marginTop:"14px"}} onClick={()=>setPg("pipeline")}>Open LinkedIn Pipeline</button>
+            </div>
+          ) : filtTrack.map((ct,i)=>(
+            <div key={ct.id || i} style={card}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"12px",flexWrap:"wrap"}}>
+                <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
+                  <div style={av()}>{(ct.name || "?")[0]}</div>
+                  <div>
+                    <h3 style={{fontSize:"14px",fontWeight:700,margin:0}}>{ct.name}</h3>
+                    <p style={{fontSize:"12px",color:C.sub}}>{ct.role} at {ct.company}</p>
+                    <div style={{display:"flex",gap:"6px",marginTop:"6px",flexWrap:"wrap"}}>
+                      <span style={{...tag,background:"#f5f5f4",color:C.sub}}>{ct.source}</span>
+                      {ct.platform && <span style={{...tag,background:C.infoLight,color:C.info}}>{ct.platform}</span>}
+                    </div>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+                  <div style={sDot(ct.status)} />
+                  <select style={sel} value={ct.status} onChange={e=>updateTrackerStatus(ct.id, e.target.value)}>
+                    {["Sent","Replied","No Response","Coffee Chat Scheduled","Referral Received"].map(o=><option key={o}>{o}</option>)}
+                  </select>
+                </div>
               </div>
               <div style={{height:1,background:C.border,margin:"12px 0"}} />
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:"12px"}}><div style={{display:"flex",gap:"16px"}}><span style={{color:C.muted}}>Sent: {ct.dateSent}</span>{ct.followUpDue&&<span style={{color:C.accent,fontWeight:600}}>Follow-up: {ct.followUpDue}</span>}</div><button style={{...btn("secondary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>startSim(ct)}>Practice Chat</button></div>
+              {ct.note && <p style={{fontSize:"12px",color:C.text,lineHeight:1.6,marginBottom:"12px"}}>{ct.note}</p>}
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"12px",gap:"12px",flexWrap:"wrap"}}>
+                <div style={{display:"flex",gap:"16px",flexWrap:"wrap"}}>
+                  <span style={{color:C.muted}}>Last activity: {ct.dateSent}</span>
+                  {ct.followUpDue&&<span style={{color:C.accent,fontWeight:600}}>Next step: {ct.followUpDue}</span>}
+                  {ct.email&&<span style={{color:C.sub}}>{ct.email}</span>}
+                </div>
+                <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                  <button style={{...btn("secondary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>startSim(ct)}>Practice Chat</button>
+                  <button style={{...btn("ghost"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>{
+                    if (ct.platform === "LinkedIn") setPg("pipeline");
+                    else if (ct.platform === "Gmail") setPg("dashboard");
+                    else setPg("replies");
+                  }}>Open Flow ?</button>
+                </div>
+              </div>
             </div>
           ))}
         </div>
@@ -1327,7 +1550,7 @@ export default function CareerCompass() {
                 ))}
               </div>
             </div>
-            <div>{fuData ? <div style={{...card,animation:"fadeIn 0.3s ease"}}><h3 style={{fontSize:"15px",fontWeight:700,marginBottom:"8px"}}>Follow-up for {fuData.reply.from}</h3><div style={mbox}>{fuData.followUp}</div><div style={{marginTop:"12px",display:"flex",gap:"6px"}}><button style={btn("primary")} onClick={()=>navigator.clipboard.writeText(fuData.followUp)}>📋 Copy</button><button style={btn("secondary")}>🔗 LinkedIn</button><button style={btn("secondary")}>✉️ Gmail</button></div></div> : <div style={{...card,textAlign:"center",padding:"50px",color:C.muted}}><p style={{fontSize:"28px",marginBottom:"8px"}}>💬</p><p style={{fontSize:"13px"}}>Click "Generate Follow-up" to see the AI response.</p></div>}</div>
+            <div>{fuData ? <div style={{...card,animation:"fadeIn 0.3s ease"}}><h3 style={{fontSize:"15px",fontWeight:700,marginBottom:"8px"}}>Follow-up for {fuData.reply.from}</h3><div style={mbox}>{fuData.followUp}</div><div style={{marginTop:"12px",display:"flex",gap:"6px"}}><button style={btn("primary")} onClick={()=>navigator.clipboard.writeText(fuData.followUp)}>📋 Copy</button><button style={btn("secondary")} onClick={()=>{const ct = allCts.find(c=>c.name===fuData.reply.from && c.company===fuData.reply.company); if (ct) openLinkedInSimulation(ct, fuData.followUp);}}>🔗 LinkedIn</button><button style={btn("secondary")}>✉️ Gmail</button></div></div> : <div style={{...card,textAlign:"center",padding:"50px",color:C.muted}}><p style={{fontSize:"28px",marginBottom:"8px"}}>💬</p><p style={{fontSize:"13px"}}>Click "Generate Follow-up" to see the AI response.</p></div>}</div>
           </div>
         </div>
       )}
@@ -1335,21 +1558,30 @@ export default function CareerCompass() {
       {/* TO-DO */}
       {pg==="todo" && (
         <div style={wrap}>
-          <h1 style={{fontSize:"24px",fontWeight:800,marginBottom:"6px"}}>To-Do & Notifications</h1>
-          <p style={{fontSize:"14px",color:C.sub,marginBottom:"20px"}}>Action items, replies, and follow-up reminders</p>
-          <div style={{display:"flex",gap:"6px",marginBottom:"16px"}}>{["all","reply","follow-up"].map(f=><button key={f} style={tab(nFilt===f)} onClick={()=>setNFilt(f)}>{f==="all"?"All":f==="reply"?"Replies":"Follow-ups"} ({f==="all"?NOTIFICATIONS.length:NOTIFICATIONS.filter(n=>n.type===f).length})</button>)}</div>
-          {filtNotif.map(n=>(
-            <div key={n.id} style={{...card,padding:"16px",display:"flex",gap:"12px",alignItems:"flex-start"}}>
-              <div style={{width:8,height:8,borderRadius:"50%",background:n.type==="reply"?C.ok:C.accent,flexShrink:0,marginTop:"6px"}} />
-              <div style={{flex:1}}>
-                <div style={{display:"flex",justifyContent:"space-between"}}><div><p style={{fontSize:"14px",fontWeight:700,margin:0}}>{n.message}</p><p style={{fontSize:"12px",color:C.sub,margin:"3px 0"}}>{n.detail}</p></div><span style={{fontSize:"11px",color:C.muted,whiteSpace:"nowrap"}}>{n.time}</span></div>
-                <div style={{display:"flex",gap:"6px",marginTop:"10px"}}>
-                  {n.type==="reply" && <button style={{...btn("primary"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>{const r=SIMULATED_REPLIES.find(x=>x.from===n.contact);if(r)genFollowUp(r);setPg("replies");}}>Generate Follow-up →</button>}
-                  {n.type==="follow-up" && <button style={{...btn("amber"),fontSize:"12px",padding:"6px 12px"}} onClick={()=>{const ct=allCts.find(c=>c.name===n.contact);if(ct){setSelCt(ct);setSelCo(ct.company);genMsg(ct,"linkedin");setPg("dashboard");}}}>Send Follow-up →</button>}
+          <h1 style={{fontSize:"24px",fontWeight:800,marginBottom:"6px"}}>To-Do & Action Hub</h1>
+          <p style={{fontSize:"14px",color:C.sub,marginBottom:"20px"}}>Live actions pulled from your outreach drafts, follow-up queue, and reply inbox demo.</p>
+          <div style={{display:"flex",gap:"6px",marginBottom:"16px"}}>{["all","reply","follow-up"].map(f=><button key={f} style={tab(nFilt===f)} onClick={()=>setNFilt(f)}>{f==="all"?"All":f==="reply"?"Replies":"Follow-ups"} ({f==="all"?todoItems.length:todoItems.filter(n=>n.type===f).length})</button>)}</div>
+          {filtNotif.length === 0 ? (
+            <div style={{...card,textAlign:"center",padding:"50px",color:C.muted}}>
+              <p style={{fontSize:"28px",marginBottom:"8px"}}>✅</p>
+              <p style={{fontSize:"13px"}}>No pending actions right now.</p>
+            </div>
+          ) : filtNotif.map(n=>(
+              <div key={n.id} style={{...card,padding:"16px",display:"flex",gap:"12px",alignItems:"flex-start"}}>
+                <div style={{width:8,height:8,borderRadius:"50%",background:n.type==="reply"?C.ok:C.accent,flexShrink:0,marginTop:"6px"}} />
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}><div><p style={{fontSize:"14px",fontWeight:700,margin:0}}>{n.message}</p><p style={{fontSize:"12px",color:C.sub,margin:"3px 0"}}>{n.detail}</p></div><span style={{fontSize:"11px",color:C.muted,whiteSpace:"nowrap"}}>{n.time}</span></div>
+                  <div style={{display:"flex",gap:"6px",marginTop:"10px"}}>
+                    <button
+                      style={{...(n.type==="reply"?btn("primary"):btn("amber")),fontSize:"12px",padding:"6px 12px"}}
+                      onClick={()=>handleTodoAction(n)}
+                    >
+                      {n.actionLabel}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            ))}
         </div>
       )}
 
@@ -1375,6 +1607,84 @@ export default function CareerCompass() {
         <div style={{maxWidth:"700px",margin:"0 auto",padding:"28px 24px",animation:"fadeIn 0.3s ease"}}>
           <button style={btn("ghost")} onClick={()=>setPg("sim")}>← Back</button>
           <div style={{marginTop:"16px"}}><h1 style={{fontSize:"22px",fontWeight:800}}>Post-Chat Follow-ups</h1><p style={{fontSize:"14px",color:C.sub,marginTop:"4px"}}>For {fuData?.reply?.from} at {fuData?.reply?.company}</p><div style={{...card,marginTop:"16px"}}><div style={mbox}>{fuData?.followUp}</div><div style={{marginTop:"14px",display:"flex",gap:"8px"}}><button style={btn("primary")} onClick={()=>navigator.clipboard.writeText(fuData?.followUp||"")}>📋 Copy All</button><button style={btn("secondary")} onClick={()=>{if(simCt)addTrack(simCt,"Coffee Chat Scheduled");setPg("tracker");}}>✓ Add to Tracker</button></div></div></div>
+        </div>
+      )}
+
+      {linkedInSim.open && linkedInSim.contact && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:260,display:"flex",alignItems:"center",justifyContent:"center",padding:"24px"}} onClick={()=>setLinkedInSim({ open:false, contact:null, note:"", addNote:true, sent:false })}>
+          <div style={{background:"#fff",borderRadius:"20px",width:"min(760px, 96vw)",maxHeight:"88vh",overflow:"hidden",boxShadow:"0 24px 70px rgba(0,0,0,0.28)"}} onClick={e=>e.stopPropagation()}>
+            <div style={{background:"#f3f2ef",padding:"10px 16px",display:"flex",alignItems:"center",gap:"8px",borderBottom:`1px solid ${C.border}`}}>
+              <div style={{display:"flex",gap:"6px"}}><div style={{width:12,height:12,borderRadius:"50%",background:"#ef4444"}} /><div style={{width:12,height:12,borderRadius:"50%",background:"#f59e0b"}} /><div style={{width:12,height:12,borderRadius:"50%",background:"#22c55e"}} /></div>
+              <div style={{flex:1,background:"#fff",borderRadius:"7px",padding:"6px 12px",fontSize:"12px",color:C.muted,border:`1px solid ${C.border}`}}>
+                linkedin.com/in/{linkedInSim.contact.name.toLowerCase().replace(/\s+/g,"")}
+              </div>
+            </div>
+
+            <div style={{padding:"22px",display:"grid",gap:"16px",background:"#fff"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"12px",flexWrap:"wrap"}}>
+                <div style={{display:"flex",gap:"12px",alignItems:"center"}}>
+                  <div style={{...av("#0077B5"),width:52,height:52,fontSize:"18px"}}>{linkedInSim.contact.name?.[0] || "?"}</div>
+                  <div>
+                    <h3 style={{fontSize:"18px",fontWeight:800,margin:0}}>Connect with {linkedInSim.contact.name}</h3>
+                    <p style={{fontSize:"13px",color:C.sub,margin:"4px 0 0"}}>{linkedInSim.contact.role} at {linkedInSim.contact.company}</p>
+                    <p style={{fontSize:"12px",color:C.muted,margin:"4px 0 0"}}>{linkedInSim.contact.school}{linkedInSim.contact.tenure ? ` · ${linkedInSim.contact.tenure}` : ""}</p>
+                  </div>
+                </div>
+                <button style={{...btn("ghost"),padding:"8px 12px",border:`1px solid ${C.border}`}} onClick={()=>setLinkedInSim({ open:false, contact:null, note:"", addNote:true, sent:false })}>Close</button>
+              </div>
+
+              <div style={{padding:"16px",background:"#f8fafc",border:`1px solid ${C.border}`,borderRadius:"14px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
+                  <div>
+                    <p style={{fontSize:"13px",fontWeight:700,margin:0,color:C.text}}>LinkedIn Connect Request</p>
+                    <p style={{fontSize:"12px",color:C.sub,margin:"4px 0 0"}}>Simulate opening their profile, adding a note, and sending the request inside the demo.</p>
+                  </div>
+                  <label style={{display:"flex",alignItems:"center",gap:"8px",fontSize:"13px",color:C.sub,cursor:"pointer"}}>
+                    <input type="checkbox" checked={linkedInSim.addNote} onChange={e=>setLinkedInSim(prev=>({ ...prev, addNote:e.target.checked }))} />
+                    Add a note
+                  </label>
+                </div>
+
+                {linkedInSim.addNote && (
+                  <div style={{marginTop:"14px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
+                      <span style={{fontSize:"12px",color:C.sub}}>Personalized note</span>
+                      <span style={{fontSize:"12px",color:(linkedInSim.note || "").length > 300 ? C.err : C.muted,fontWeight:700}}>{(linkedInSim.note || "").length}/300</span>
+                    </div>
+                    <textarea
+                      value={linkedInSim.note}
+                      onChange={e=>setLinkedInSim(prev=>({ ...prev, note:e.target.value.slice(0, 300) }))}
+                      style={{...mboxArea("linkedin"),minHeight:"150px"}}
+                      placeholder="Add a short note with your connection request..."
+                    />
+                  </div>
+                )}
+              </div>
+
+              {!linkedInSim.sent ? (
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
+                  <p style={{fontSize:"12px",color:C.sub,margin:0}}>This is a simulation for your demo. Nothing is being sent to real LinkedIn.</p>
+                  <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                    <button style={btn("secondary")} onClick={async ()=>{
+                      const refreshed = await genMsg(linkedInSim.contact, "linkedin");
+                      setLinkedInSim(prev => ({ ...prev, note: refreshed || prev.note }));
+                    }} disabled={busy}>Refresh Note</button>
+                    <button style={btn("primary")} onClick={submitLinkedInSimulation} disabled={linkedInSim.addNote && !(linkedInSim.note || "").trim()}>
+                      Send Request
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{padding:"16px",background:C.okLight,border:`1px solid ${C.ok}33`,borderRadius:"14px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
+                  <div>
+                    <p style={{fontSize:"15px",fontWeight:800,color:C.ok,margin:0}}>Connection request sent</p>
+                    <p style={{fontSize:"12px",color:C.sub,margin:"4px 0 0"}}>{linkedInSim.contact.name} was added to your tracker with a LinkedIn note.</p>
+                  </div>
+                  <button style={btn("secondary")} onClick={()=>setLinkedInSim({ open:false, contact:null, note:"", addNote:true, sent:false })}>Done</button>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -1450,3 +1760,5 @@ export default function CareerCompass() {
     </div>
   );
 }
+
+
